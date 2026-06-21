@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const zlib = require('zlib'); // ← THIẾU: Phải require zlib ở đầu file
 
 const app = express();
 
@@ -32,10 +33,11 @@ function fetchUrl(url) {
         'Accept-Encoding': 'gzip, deflate, br',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache'
-      }
+      },
+      timeout: 15000 // ← THIẾU: Timeout 15 giây tránh treo
     };
     
-    client.get(url, options, (res) => {
+    const request = client.get(url, options, (res) => {
       // Handle redirect
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         const redirectUrl = new URL(res.headers.location, url).href;
@@ -45,17 +47,15 @@ function fetchUrl(url) {
       
       let data = [];
       
-      // Handle gzip/deflate
+      // Handle gzip/deflate/brotli
       let stream = res;
       const encoding = res.headers['content-encoding'];
+      
       if (encoding === 'gzip') {
-        const zlib = require('zlib');
         stream = res.pipe(zlib.createGunzip());
       } else if (encoding === 'deflate') {
-        const zlib = require('zlib');
         stream = res.pipe(zlib.createInflate());
       } else if (encoding === 'br') {
-        const zlib = require('zlib');
         stream = res.pipe(zlib.createBrotliDecompress());
       }
       
@@ -70,8 +70,33 @@ function fetchUrl(url) {
         });
       });
       stream.on('error', reject);
-    }).on('error', reject);
+    });
+    
+    request.on('error', reject);
+    request.on('timeout', () => {
+      request.destroy();
+      reject(new Error('Request timeout'));
+    });
   });
+}
+
+// ========== REMOVE ERUDA FROM HTML ==========
+function removeEruda(html) {
+  // Xóa script tags chứa eruda
+  html = html.replace(/<script[^>]*?src=["'][^"']*eruda[^"']*["'][^>]*?><\/script>/gi, '<!-- Eruda removed -->');
+  html = html.replace(/<script[^>]*?src=["'][^"']*eruda[^"']*["'][^>]*?>.*?<\/script>/gi, '<!-- Eruda removed -->');
+  
+  // Xóa inline script eruda
+  html = html.replace(/<script>[\s\S]*?eruda[\s\S]*?<\/script>/gi, '<!-- Eruda inline removed -->');
+  
+  // Disable eruda.init()
+  html = html.replace(/eruda\s*\.\s*init\s*\(/gi, '(function(){console.log("Eruda blocked")})(');
+  
+  // Xóa window.eruda references
+  html = html.replace(/window\s*\.\s*eruda/gi, 'undefined');
+  
+  console.log('🔧 Eruda removed from HTML');
+  return html;
 }
 
 // ========== INJECT TAPMONKEY SCRIPT ==========
@@ -89,6 +114,18 @@ function injectTapmonkeyScript(html, tapmonkeyCode) {
   console.log('🎮 TapMonkey Cloud Browser Auto-Inject');
   console.log('⏰ Time: ' + new Date().toLocaleString('vi-VN'));
   
+  // Block Eruda errors
+  var originalOnError = window.onerror;
+  window.onerror = function(msg, url, line, col, error) {
+    if (msg && (msg.includes('eruda') || msg.includes('Eruda'))) {
+      return true; // Chặn lỗi Eruda
+    }
+    if (originalOnError) {
+      return originalOnError.apply(this, arguments);
+    }
+    return false;
+  };
+  
   // Execute TapMonkey code
   try {
     ${tapmonkeyCode}
@@ -101,13 +138,13 @@ function injectTapmonkeyScript(html, tapmonkeyCode) {
 <!-- ===== END TAPMONKEY ===== -->
 `;
   
-  // Inject before </body> or </html>
+  // Inject before </body> or </html> or end of file
   if (html.includes('</body>')) {
     return html.replace('</body>', injectionCode + '\n</body>');
   } else if (html.includes('</html>')) {
     return html.replace('</html>', injectionCode + '\n</html>');
   } else {
-    return html + injectionCode;
+    return html + '\n' + injectionCode;
   }
 }
 
@@ -141,13 +178,18 @@ app.get('/proxy', async (req, res) => {
     
     if (fs.existsSync(tapmonkeyPath)) {
       tapmonkeyCode = fs.readFileSync(tapmonkeyPath, 'utf8');
-      console.log('✅ TapMonkey script loaded');
+      console.log('✅ TapMonkey script loaded (' + (tapmonkeyCode.length / 1024).toFixed(1) + 'KB)');
     } else {
       console.warn('⚠️ TapMonkey script not found, serving without injection');
     }
     
-    // Inject script
+    // Process HTML
     let modifiedHtml = result.html;
+    
+    // Step 1: Remove Eruda
+    modifiedHtml = removeEruda(modifiedHtml);
+    
+    // Step 2: Inject TapMonkey
     if (tapmonkeyCode) {
       modifiedHtml = injectTapmonkeyScript(modifiedHtml, tapmonkeyCode);
       console.log('💉 TapMonkey injected into HTML');
@@ -156,11 +198,34 @@ app.get('/proxy', async (req, res) => {
     // Send response
     res.set('Content-Type', result.contentType || 'text/html; charset=utf-8');
     res.set('Access-Control-Allow-Origin', '*');
+    res.set('X-Proxy-By', 'CloudBrowser-v4');
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(modifiedHtml);
     
   } catch (error) {
     console.error('❌ Proxy error:', error.message);
-    res.status(500).send(`<h1>❌ Proxy Error</h1><p>${error.message}</p><a href="/">Back to Cloud Browser</a>`);
+    res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>❌ Proxy Error</title>
+        <style>
+          body { font-family: Arial, sans-serif; padding: 20px; text-align: center; }
+          h1 { color: #f44336; }
+          p { color: #666; margin: 10px 0; }
+          a { color: #667eea; }
+        </style>
+      </head>
+      <body>
+        <h1>❌ Proxy Error</h1>
+        <p>${error.message}</p>
+        <p><small>Có thể trang web đã chặn proxy hoặc không phản hồi</small></p>
+        <a href="/">🔙 Quay về Cloud Browser</a>
+      </body>
+      </html>
+    `);
   }
 });
 
@@ -609,6 +674,15 @@ app.get('/', (req, res) => {
           loadingBar.classList.add('active');
         }
 
+        // Block Eruda errors in parent window too
+        window.addEventListener('error', function(e) {
+          if (e.message && (e.message.includes('eruda') || e.message.includes('Eruda'))) {
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+          }
+        }, true);
+
         updateButtons();
 
         console.log('════════════════════════════════════');
@@ -664,19 +738,20 @@ app.get('/api/status', (req, res) => {
     server: 'Cloud Browser v4 - Auto TapMonkey',
     tapmonkey: fs.existsSync(tapmonkeyPath) ? 'ready' : 'missing',
     injection: 'proxy-based auto-inject',
+    eruda: 'blocked',
     timestamp: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
   });
 });
 
 // ========== 404 HANDLER ==========
 app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
+  res.status(404).json({ error: 'Not found', path: req.path });
 });
 
 // ========== ERROR HANDLER ==========
 app.use((err, req, res, next) => {
-  console.error('❌ Error:', err.message);
-  res.status(500).json({ error: 'Internal server error' });
+  console.error('❌ Server Error:', err.message);
+  res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
 // ========== START SERVER ==========
@@ -690,12 +765,14 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════╗');
   console.log('║  ☁️  CLOUD BROWSER v4 - RENDER        ║');
   console.log('║  🎮 TapMonkey AUTO-INJECT (Proxy)    ║');
+  console.log('║  🔧 Eruda Auto-Blocked               ║');
   console.log('╚════════════════════════════════════════╝');
   console.log('');
   console.log(`✅ Server started`);
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌐 URL: https://f1686s.com/home/mine`);
   console.log(`💉 Injection: Proxy-based (auto)`);
+  console.log(`🔧 Eruda: Auto-blocked`);
   console.log(`📦 TapMonkey: ${tapmonkeyReady ? '✅ READY' : '❌ MISSING - Add file to public/tapmonkey/'}`);
   console.log(`⏰ Time: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`);
   console.log('');
@@ -724,6 +801,15 @@ process.on('SIGINT', () => {
   });
 });
 
+// ========== UNCAUGHT ERRORS ==========
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err.message);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection:', reason);
+});
+
 // ========== KEEP ALIVE ==========
 setInterval(() => {
   const appUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -731,6 +817,6 @@ setInterval(() => {
   client.get(appUrl + '/api/status', (res) => {
     console.log('💓 Keep-alive ping sent');
   }).on('error', (err) => {
-    console.log('⚠️ Keep-alive ping failed');
+    console.log('⚠️ Keep-alive ping failed: ' + err.message);
   });
-}, 600000);
+}, 600000); // 10 minutes
