@@ -12,7 +12,7 @@ const app = express();
 const CONFIG = {
   DEFAULT_URL: 'https://f1686s.com/home/mine',
   PORT: process.env.PORT || 3000,
-  TIMEOUT: 20000,
+  TIMEOUT: 25000,
   USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 };
 
@@ -53,10 +53,7 @@ function fetchUrl(url, retries = 2) {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
         'Connection': 'close',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none'
+        'Upgrade-Insecure-Requests': '1'
       },
       timeout: CONFIG.TIMEOUT
     };
@@ -144,17 +141,18 @@ function removeEruda(html) {
   }
 }
 
-// ========== INJECT TAPMONKEY (Userscript) ==========
-function injectTapmonkeyScript(html, tapmonkeyCode, tapmonkeyUrl) {
-  if (!tapmonkeyCode && !tapmonkeyUrl) return html;
+// ========== INJECT TAPMONKEY EXTENSION ==========
+function injectTapmonkey(html, tapmonkeyCode) {
+  if (!tapmonkeyCode) return html;
   
   try {
     const injectionCode = `
-<!-- ===== TAPMONKEY INJECTED ===== -->
+<!-- ===== TAPMONKEY EXTENSION ===== -->
 <script type="text/javascript">
 (function() {
   'use strict';
-  console.log('🎮 TapMonkey Loader v2.0');
+  console.log('🎮 Cloud Chrome - TapMonkey Extension v2.0');
+  console.log('⏰ Loaded: ' + new Date().toLocaleString('vi-VN'));
   
   // Block Eruda errors
   window.addEventListener('error', function(e) {
@@ -165,37 +163,80 @@ function injectTapmonkeyScript(html, tapmonkeyCode, tapmonkeyUrl) {
     }
   }, true);
   
-  // Load TapMonkey
-  function loadTapmonkey() {
-    try {
-      // Inline code
-      ${tapmonkeyCode || ''}
+  // Intercept fetch and XHR to handle dynamic content
+  const originalFetch = window.fetch;
+  window.fetch = function(...args) {
+    return originalFetch.apply(this, args).then(response => {
+      // Check if response is HTML
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('text/html')) {
+        return response.text().then(html => {
+          // Process HTML if needed
+          return new Response(html, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        });
+      }
+      return response;
+    });
+  };
+  
+  // TapMonkey Core
+  const TapMonkey = {
+    version: '2.0.0',
+    scripts: [],
+    running: false,
+    
+    // Register a script
+    register: function(name, code) {
+      this.scripts.push({ name, code });
+      console.log('📦 Script registered:', name);
+    },
+    
+    // Execute all scripts
+    run: function() {
+      if (this.running) return;
+      this.running = true;
       
-      // Or load from external
-      ${tapmonkeyUrl ? `
-      var script = document.createElement('script');
-      script.src = '${tapmonkeyUrl}';
-      script.onload = function() {
-        console.log('✅ TapMonkey loaded from: ${tapmonkeyUrl}');
-      };
-      script.onerror = function() {
-        console.error('❌ Failed to load TapMonkey');
-      };
-      document.head.appendChild(script);
-      ` : ''}
-      
-      console.log('✅ TapMonkey initialized');
-    } catch(e) {
-      console.error('❌ TapMonkey error:', e.message);
+      this.scripts.forEach(script => {
+        try {
+          // Execute in isolated scope
+          const fn = new Function(script.code);
+          fn.call(window);
+          console.log('✅ Script executed:', script.name);
+        } catch(e) {
+          console.error('❌ Script error:', script.name, e.message);
+        }
+      });
+    },
+    
+    // Auto-run when DOM is ready
+    init: function() {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => this.run());
+      } else {
+        this.run();
+      }
     }
+  };
+  
+  // Expose to window
+  window.TapMonkey = TapMonkey;
+  
+  // ===== MAIN SCRIPT =====
+  try {
+    ${tapmonkeyCode}
+  } catch(e) {
+    console.error('❌ TapMonkey load error:', e.message);
   }
   
-  // Wait for DOM
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', loadTapmonkey);
-  } else {
-    loadTapmonkey();
-  }
+  // Initialize
+  TapMonkey.init();
+  
+  console.log('✅ TapMonkey Extension ready');
+  console.log('📊 Scripts loaded:', TapMonkey.scripts.length);
 })();
 </script>
 <!-- ===== END TAPMONKEY ===== -->
@@ -234,14 +275,11 @@ app.get('/proxy', async (req, res) => {
     
     // Load TapMonkey
     let tapmonkeyCode = '';
-    let tapmonkeyUrl = '';
     const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
-    const tapmonkeyPublicPath = '/tapmonkey/f1686s_naptien.js';
     
     if (fs.existsSync(tapmonkeyPath)) {
       try {
         tapmonkeyCode = fs.readFileSync(tapmonkeyPath, 'utf8');
-        tapmonkeyUrl = tapmonkeyPublicPath;
         console.log(`✅ TapMonkey loaded (${(tapmonkeyCode.length / 1024).toFixed(1)}KB)`);
       } catch (e) {
         console.warn('⚠️ Cannot read TapMonkey:', e.message);
@@ -255,21 +293,28 @@ app.get('/proxy', async (req, res) => {
     modifiedHtml = removeEruda(modifiedHtml);
     
     // Inject TapMonkey
-    if (tapmonkeyCode || tapmonkeyUrl) {
-      modifiedHtml = injectTapmonkeyScript(modifiedHtml, tapmonkeyCode, tapmonkeyUrl);
-      console.log('💉 TapMonkey injected');
+    if (tapmonkeyCode) {
+      modifiedHtml = injectTapmonkey(modifiedHtml, tapmonkeyCode);
+      console.log('💉 TapMonkey injected as extension');
     }
+    
+    // Remove X-Frame-Options to allow iframe
+    delete result.headers['x-frame-options'];
     
     // Send response
     res.setHeader('Content-Type', result.contentType || 'text/html; charset=utf-8');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('X-Proxy-By', 'CloudBrowser-v6');
+    res.setHeader('X-Proxy-By', 'CloudChrome-v1');
     res.setHeader('Cache-Control', 'no-cache, no-store');
     res.send(modifiedHtml);
     
   } catch (error) {
     console.error('❌ Proxy error:', error.message);
-    res.status(500).json({ error: error.message, url: req.query.url });
+    res.status(500).json({ 
+      error: error.message, 
+      url: req.query.url,
+      timestamp: new Date().toISOString()
+    });
   }
 });
 
@@ -290,7 +335,7 @@ app.get('/tapmonkey/:filename', (req, res) => {
   res.sendFile(filePath);
 });
 
-// ========== MAIN PAGE ==========
+// ========== MAIN PAGE - CLOUD CHROME ==========
 app.get('/', (req, res) => {
   const defaultUrl = CONFIG.DEFAULT_URL;
   
@@ -300,206 +345,252 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#1a1a2e">
-  <title>☁️ Cloud Browser</title>
+  <meta name="theme-color" content="#202124">
+  <title>☁️ Cloud Chrome - TapMonkey</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
-      --primary: #667eea;
-      --primary-dark: #5a67d8;
-      --secondary: #764ba2;
-      --bg: #0f0f1a;
-      --surface: #1a1a2e;
-      --surface-light: #2d2d44;
-      --text: #e2e8f0;
-      --text-muted: #94a3b8;
+      --bg: #202124;
+      --surface: #292a2d;
+      --surface-light: #3c4043;
+      --text: #e8eaed;
+      --text-muted: #9aa0a6;
+      --primary: #1a73e8;
+      --primary-hover: #1557b0;
+      --border: #3c4043;
     }
     
     html, body {
       width: 100%;
       height: 100%;
       overflow: hidden;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
       background: var(--bg);
       color: var(--text);
     }
     
-    body {
-      display: flex;
-      flex-direction: column;
-    }
+    body { display: flex; flex-direction: column; }
     
-    /* ===== TOOLBAR ===== */
-    .toolbar {
+    /* ===== CHROME TOOLBAR ===== */
+    .chrome-toolbar {
       background: var(--surface);
-      padding: 10px 12px;
+      padding: 8px 12px;
       display: flex;
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
+      border-bottom: 1px solid var(--border);
       flex-shrink: 0;
-      min-height: 52px;
+      min-height: 48px;
     }
     
-    .toolbar-brand {
+    .chrome-tabs {
       display: flex;
       align-items: center;
-      gap: 8px;
-      color: var(--primary);
-      font-weight: 700;
-      font-size: 16px;
-      white-space: nowrap;
-    }
-    
-    .toolbar-brand span {
-      font-size: 20px;
-    }
-    
-    .toolbar-buttons {
-      display: flex;
       gap: 4px;
-    }
-    
-    .btn {
-      background: rgba(255,255,255,0.06);
-      color: var(--text-muted);
-      border: none;
-      padding: 6px 10px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 14px;
-      transition: all 0.2s;
-      touch-action: manipulation;
-      min-width: 32px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    
-    .btn:hover {
-      background: rgba(255,255,255,0.12);
-      color: var(--text);
-    }
-    
-    .btn:active {
-      transform: scale(0.92);
-    }
-    
-    .btn:disabled {
-      opacity: 0.3;
-      cursor: not-allowed;
-      transform: none;
-    }
-    
-    .btn-primary {
-      background: var(--primary);
-      color: white;
-    }
-    
-    .btn-primary:hover {
-      background: var(--primary-dark);
-      color: white;
-    }
-    
-    .btn-home {
-      background: linear-gradient(135deg, var(--primary), var(--secondary));
-      color: white;
-      font-weight: 600;
-    }
-    
-    .btn-home:hover {
-      opacity: 0.9;
-    }
-    
-    .address-bar-container {
       flex: 1;
+      min-width: 100px;
+      overflow-x: auto;
+      padding: 2px 0;
+    }
+    
+    .chrome-tabs::-webkit-scrollbar {
+      height: 2px;
+    }
+    
+    .chrome-tabs::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 2px;
+    }
+    
+    .tab {
+      background: var(--bg);
+      padding: 6px 14px;
+      border-radius: 8px 8px 0 0;
+      font-size: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      white-space: nowrap;
+      border: 1px solid var(--border);
+      border-bottom: none;
       display: flex;
       align-items: center;
       gap: 6px;
-      min-width: 150px;
+      transition: all 0.2s;
+      min-width: 60px;
+      max-width: 160px;
+    }
+    
+    .tab.active {
+      background: var(--surface-light);
+      color: var(--text);
+      border-color: var(--primary);
+    }
+    
+    .tab:hover {
+      background: var(--surface-light);
+      color: var(--text);
+    }
+    
+    .tab-close {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0 2px;
+      border-radius: 4px;
+      line-height: 1;
+    }
+    
+    .tab-close:hover {
+      background: rgba(255,255,255,0.1);
+      color: white;
+    }
+    
+    .new-tab-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 4px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    
+    .new-tab-btn:hover {
+      background: var(--surface-light);
+      color: var(--text);
+    }
+    
+    .chrome-nav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    
+    .nav-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      padding: 6px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 18px;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 32px;
+    }
+    
+    .nav-btn:hover {
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+    }
+    
+    .nav-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+    
+    .nav-btn:active {
+      transform: scale(0.92);
+    }
+    
+    .nav-btn.primary {
+      color: var(--primary);
+    }
+    
+    .nav-btn.primary:hover {
+      background: rgba(26, 115, 232, 0.2);
     }
     
     .address-bar {
       flex: 1;
-      padding: 7px 12px;
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 8px;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
       font-size: 13px;
-      background: rgba(255,255,255,0.05);
+      background: var(--bg);
       color: var(--text);
       outline: none;
       transition: border-color 0.2s;
-      min-width: 80px;
+      min-width: 120px;
     }
     
     .address-bar:focus {
       border-color: var(--primary);
-      background: rgba(255,255,255,0.08);
+      background: var(--surface);
     }
     
     .address-bar::placeholder {
       color: var(--text-muted);
     }
     
-    .btn-go {
-      background: var(--primary);
-      color: white;
-      border: none;
-      padding: 7px 16px;
-      border-radius: 8px;
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 13px;
-      transition: background 0.2s;
-    }
-    
-    .btn-go:hover {
-      background: var(--primary-dark);
-    }
-    
-    /* ===== STATUS BAR ===== */
-    .status-bar {
+    /* ===== EXTENSIONS BAR ===== */
+    .extensions-bar {
       background: var(--surface);
-      padding: 4px 12px;
+      padding: 2px 12px;
       display: flex;
       justify-content: space-between;
       align-items: center;
       font-size: 11px;
       color: var(--text-muted);
-      border-bottom: 1px solid rgba(255,255,255,0.05);
+      border-bottom: 1px solid var(--border);
       flex-shrink: 0;
       flex-wrap: wrap;
       gap: 4px;
+      min-height: 28px;
     }
     
-    .status-item {
+    .extension-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    
+    .extension-icon {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    
+    .extension-icon.tapmonkey {
+      background: rgba(26, 115, 232, 0.2);
+      color: var(--primary);
+    }
+    
+    .extension-icon.ready {
+      background: rgba(52, 168, 83, 0.2);
+      color: #34a853;
+    }
+    
+    .status-text {
       display: flex;
       align-items: center;
       gap: 6px;
     }
     
     .status-dot {
-      width: 7px;
-      height: 7px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: #22c55e;
+      background: #34a853;
       display: inline-block;
       animation: pulse 2s infinite;
     }
     
     @keyframes pulse {
       0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
-    }
-    
-    .badge {
-      background: linear-gradient(135deg, var(--primary), var(--secondary));
-      color: white;
-      padding: 2px 10px;
-      border-radius: 12px;
-      font-size: 10px;
-      font-weight: 600;
+      50% { opacity: 0.3; }
     }
     
     .url-display {
@@ -507,6 +598,7 @@ app.get('/', (req, res) => {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      color: var(--text-muted);
     }
     
     /* ===== BROWSER ===== */
@@ -520,7 +612,7 @@ app.get('/', (req, res) => {
     
     .loading-bar {
       height: 3px;
-      background: linear-gradient(90deg, var(--primary), var(--secondary));
+      background: var(--primary);
       width: 0%;
       transition: width 0.3s;
       position: absolute;
@@ -548,39 +640,35 @@ app.get('/', (req, res) => {
     }
     
     /* ===== RESPONSIVE ===== */
-    @media (max-width: 640px) {
-      .toolbar {
+    @media (max-width: 768px) {
+      .chrome-toolbar {
         padding: 6px 8px;
         gap: 4px;
       }
       
-      .toolbar-brand {
-        font-size: 14px;
-      }
-      
-      .toolbar-brand span {
-        font-size: 18px;
-      }
-      
-      .btn {
-        padding: 4px 8px;
-        font-size: 12px;
-        min-width: 28px;
+      .tab {
+        font-size: 11px;
+        padding: 4px 10px;
+        min-width: 40px;
+        max-width: 100px;
       }
       
       .address-bar {
         font-size: 12px;
-        padding: 5px 8px;
+        padding: 4px 10px;
+        min-width: 80px;
       }
       
-      .btn-go {
-        padding: 5px 12px;
-        font-size: 12px;
+      .nav-btn {
+        font-size: 16px;
+        padding: 4px 6px;
+        min-width: 28px;
       }
       
-      .status-bar {
+      .extensions-bar {
         font-size: 10px;
-        padding: 3px 8px;
+        padding: 2px 8px;
+        min-height: 24px;
       }
       
       .url-display {
@@ -588,60 +676,50 @@ app.get('/', (req, res) => {
       }
     }
     
-    @media (max-width: 400px) {
-      .toolbar-brand span {
+    @media (max-width: 480px) {
+      .chrome-tabs {
         display: none;
       }
       
-      .toolbar-brand {
-        font-size: 12px;
+      .new-tab-btn {
+        display: none;
       }
-    }
-    
-    /* Scrollbar */
-    ::-webkit-scrollbar {
-      width: 6px;
-      height: 6px;
-    }
-    ::-webkit-scrollbar-track {
-      background: var(--bg);
-    }
-    ::-webkit-scrollbar-thumb {
-      background: var(--surface-light);
-      border-radius: 3px;
     }
   </style>
 </head>
 <body>
-  <!-- Toolbar -->
-  <div class="toolbar">
-    <div class="toolbar-brand">
-      <span>☁️</span> Cloud
+  <!-- Chrome Toolbar -->
+  <div class="chrome-toolbar">
+    <div class="chrome-tabs" id="tabContainer">
+      <div class="tab active" data-tab="0">
+        <span>📄</span>
+        <span class="tab-title">Cloud Chrome</span>
+        <button class="tab-close" data-tab="0">✕</button>
+      </div>
+    </div>
+    <button class="new-tab-btn" id="newTabBtn">+</button>
+    
+    <div class="chrome-nav">
+      <button class="nav-btn" id="backBtn" title="Back">◀</button>
+      <button class="nav-btn" id="forwardBtn" title="Forward">▶</button>
+      <button class="nav-btn" id="refreshBtn" title="Refresh">⟳</button>
+      <button class="nav-btn primary" id="homeBtn" title="Home">🏠</button>
     </div>
     
-    <div class="toolbar-buttons">
-      <button class="btn" id="backBtn" title="Back">◀</button>
-      <button class="btn" id="forwardBtn" title="Forward">▶</button>
-      <button class="btn" id="refreshBtn" title="Refresh">⟳</button>
-      <button class="btn btn-home" id="homeBtn" title="Home">🏠</button>
-    </div>
-    
-    <div class="address-bar-container">
-      <input type="text" class="address-bar" id="addressBar" placeholder="Enter URL..." value="${defaultUrl}" autofocus>
-      <button class="btn-go" id="goBtn">Go</button>
-    </div>
+    <input type="text" class="address-bar" id="addressBar" placeholder="Search or enter URL..." value="${defaultUrl}">
   </div>
   
-  <!-- Status Bar -->
-  <div class="status-bar">
-    <div class="status-item">
+  <!-- Extensions Bar -->
+  <div class="extensions-bar">
+    <div class="extension-badge">
       <span class="status-dot"></span>
       <span>Online</span>
+      <span class="extension-icon tapmonkey">🎮 TapMonkey v2.0</span>
+      <span class="extension-icon ready">✅ Ready</span>
     </div>
-    <div class="status-item">
-      <span class="badge">🎮 TapMonkey</span>
+    <div class="status-text">
+      <span class="url-display" id="urlDisplay">${defaultUrl}</span>
     </div>
-    <div class="status-item url-display" id="urlDisplay">${defaultUrl}</div>
   </div>
   
   <!-- Browser -->
@@ -650,8 +728,8 @@ app.get('/', (req, res) => {
     <iframe 
       id="browserFrame" 
       src="/proxy?url=${encodeURIComponent(defaultUrl)}"
-      sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-top-navigation allow-modals allow-downloads"
-      allow="accelerometer; camera; gyroscope; magnetometer; microphone; payment; usb; geolocation"
+      sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-top-navigation allow-modals allow-downloads allow-storage-access-by-user-activation"
+      allow="accelerometer; camera; gyroscope; magnetometer; microphone; payment; usb; geolocation; clipboard-read; clipboard-write"
       loading="eager"
     ></iframe>
   </div>
@@ -669,14 +747,20 @@ app.get('/', (req, res) => {
       const forwardBtn = document.getElementById('forwardBtn');
       const refreshBtn = document.getElementById('refreshBtn');
       const homeBtn = document.getElementById('homeBtn');
-      const goBtn = document.getElementById('goBtn');
+      const newTabBtn = document.getElementById('newTabBtn');
+      const tabContainer = document.getElementById('tabContainer');
       
       const defaultUrl = '${defaultUrl}';
-      let history = [defaultUrl];
-      let historyIndex = 0;
+      let tabs = [{ id: 0, url: defaultUrl, title: 'Cloud Chrome' }];
+      let activeTab = 0;
+      let tabCounter = 1;
+      
+      // History per tab
+      let histories = { 0: [defaultUrl] };
+      let historyIndexes = { 0: 0 };
       
       // Navigate function
-      function navigate(url) {
+      function navigate(url, tabId = activeTab) {
         if (!url) return;
         url = url.trim();
         if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -694,19 +778,36 @@ app.get('/', (req, res) => {
         addressBar.value = url;
         urlDisplay.textContent = url;
         
-        if (history[historyIndex] !== url) {
-          history = history.slice(0, historyIndex + 1);
-          history.push(url);
-          historyIndex++;
+        // Update history
+        if (!histories[tabId]) histories[tabId] = [];
+        if (!historyIndexes[tabId]) historyIndexes[tabId] = 0;
+        
+        if (histories[tabId][historyIndexes[tabId]] !== url) {
+          histories[tabId] = histories[tabId].slice(0, historyIndexes[tabId] + 1);
+          histories[tabId].push(url);
+          historyIndexes[tabId]++;
         }
-        updateButtons();
+        
+        // Update tab title
+        try {
+          const title = new URL(url).hostname;
+          const tab = tabContainer.querySelector('.tab[data-tab="' + tabId + '"]');
+          if (tab) {
+            const titleEl = tab.querySelector('.tab-title');
+            if (titleEl) titleEl.textContent = title;
+          }
+        } catch(e) {}
+        
+        updateButtons(tabId);
         showLoading();
         console.log('🌐 Navigated to:', url);
       }
       
-      function updateButtons() {
-        backBtn.disabled = historyIndex <= 0;
-        forwardBtn.disabled = historyIndex >= history.length - 1;
+      function updateButtons(tabId = activeTab) {
+        const idx = historyIndexes[tabId] || 0;
+        const hist = histories[tabId] || [defaultUrl];
+        backBtn.disabled = idx <= 0;
+        forwardBtn.disabled = idx >= hist.length - 1;
       }
       
       function showLoading() {
@@ -714,6 +815,61 @@ app.get('/', (req, res) => {
         setTimeout(() => {
           loadingBar.classList.remove('active');
         }, 3000);
+      }
+      
+      // Tab management
+      function createTab(url = defaultUrl) {
+        const id = tabCounter++;
+        const tab = document.createElement('div');
+        tab.className = 'tab active';
+        tab.dataset.tab = id;
+        tab.innerHTML = \`
+          <span>📄</span>
+          <span class="tab-title">\${new URL(url).hostname || 'New Tab'}</span>
+          <button class="tab-close" data-tab="\${id}">✕</button>
+        \`;
+        tabContainer.appendChild(tab);
+        
+        tabs.push({ id, url, title: 'New Tab' });
+        histories[id] = [url];
+        historyIndexes[id] = 0;
+        
+        // Switch to new tab
+        switchTab(id);
+        navigate(url, id);
+        return id;
+      }
+      
+      function switchTab(id) {
+        // Update active class
+        document.querySelectorAll('.tab').forEach(el => {
+          el.classList.toggle('active', parseInt(el.dataset.tab) === id);
+        });
+        activeTab = id;
+        
+        // Load tab content
+        const url = histories[id]?.[historyIndexes[id]] || defaultUrl;
+        addressBar.value = url;
+        urlDisplay.textContent = url;
+        navigate(url, id);
+        updateButtons(id);
+      }
+      
+      function closeTab(id) {
+        if (tabs.length <= 1) return;
+        
+        const tabEl = tabContainer.querySelector('.tab[data-tab="' + id + '"]');
+        if (tabEl) tabEl.remove();
+        
+        tabs = tabs.filter(t => t.id !== id);
+        delete histories[id];
+        delete historyIndexes[id];
+        
+        // Switch to another tab
+        if (activeTab === id) {
+          const firstTab = tabs[0];
+          if (firstTab) switchTab(firstTab.id);
+        }
       }
       
       // Events
@@ -731,22 +887,45 @@ app.get('/', (req, res) => {
       });
       
       refreshBtn.addEventListener('click', () => {
-        const currentUrl = history[historyIndex] || defaultUrl;
+        const currentUrl = histories[activeTab]?.[historyIndexes[activeTab]] || defaultUrl;
         navigate(currentUrl);
       });
       
       backBtn.addEventListener('click', () => {
-        if (historyIndex > 0) {
-          historyIndex--;
-          navigate(history[historyIndex]);
+        const idx = historyIndexes[activeTab] || 0;
+        if (idx > 0) {
+          historyIndexes[activeTab]--;
+          const url = histories[activeTab][historyIndexes[activeTab]];
+          navigate(url);
         }
       });
       
       forwardBtn.addEventListener('click', () => {
-        if (historyIndex < history.length - 1) {
-          historyIndex++;
-          navigate(history[historyIndex]);
+        const idx = historyIndexes[activeTab] || 0;
+        const hist = histories[activeTab] || [];
+        if (idx < hist.length - 1) {
+          historyIndexes[activeTab]++;
+          const url = hist[historyIndexes[activeTab]];
+          navigate(url);
         }
+      });
+      
+      newTabBtn.addEventListener('click', () => createTab());
+      
+      // Tab events (delegation)
+      tabContainer.addEventListener('click', (e) => {
+        const tabEl = e.target.closest('.tab');
+        if (!tabEl) return;
+        
+        const id = parseInt(tabEl.dataset.tab);
+        
+        if (e.target.classList.contains('tab-close')) {
+          e.stopPropagation();
+          closeTab(id);
+          return;
+        }
+        
+        switchTab(id);
       });
       
       // Iframe events
@@ -760,30 +939,11 @@ app.get('/', (req, res) => {
         loadingBar.classList.remove('active');
       });
       
-      // Update address bar when iframe navigates internally
-      // (limited due to CORS, but we can try)
-      browserFrame.addEventListener('load', () => {
-        try {
-          const frameUrl = browserFrame.contentWindow.location.href;
-          if (frameUrl && frameUrl.startsWith('/proxy')) {
-            const params = new URLSearchParams(frameUrl.split('?')[1]);
-            const url = params.get('url');
-            if (url) {
-              const decoded = decodeURIComponent(url);
-              addressBar.value = decoded;
-              urlDisplay.textContent = decoded;
-            }
-          }
-        } catch(e) {
-          // Cross-origin, ignore
-        }
-      });
-      
       // Init
       updateButtons();
-      console.log('☁️ Cloud Browser v6');
-      console.log('🎮 TapMonkey auto-inject via proxy');
-      console.log('📦 Script tự động chạy, không cần extension');
+      console.log('☁️ Cloud Chrome v1.0');
+      console.log('🎮 TapMonkey Extension v2.0');
+      console.log('📦 Tự động chạy trên mọi trang');
     })();
   </script>
 </body>
@@ -798,7 +958,8 @@ app.get('/api/status', (req, res) => {
   const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
   res.json({
     status: 'online',
-    version: '6.0.0',
+    version: '1.0.0',
+    name: 'Cloud Chrome',
     tapmonkey: fs.existsSync(tapmonkeyPath) ? 'ready' : 'missing',
     timestamp: new Date().toISOString()
   });
@@ -822,14 +983,14 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   
   console.log(`
 ╔════════════════════════════════════════════╗
-║  ☁️  CLOUD BROWSER v6                      ║
-║  🎮 TapMonkey Auto-Inject (Userscript)    ║
-║  🔧 Eruda Auto-Blocked                    ║
+║  ☁️  CLOUD CHROME v1.0                    ║
+║  🎮 TapMonkey Extension v2.0             ║
+║  🔧 Eruda Auto-Blocked                   ║
 ╚════════════════════════════════════════════╝
 ✅ Port: ${PORT}
 🎮 TapMonkey: ${tapmonkeyReady ? '✅ READY' : '❌ MISSING'}
-📂 TapMonkey path: ${tapmonkeyPath}
-🌐 Default URL: ${CONFIG.DEFAULT_URL}
+📂 Path: ${tapmonkeyPath}
+🌐 Default: ${CONFIG.DEFAULT_URL}
 ⏰ ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}
   `);
   
