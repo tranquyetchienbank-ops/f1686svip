@@ -3,7 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
-const zlib = require('zlib'); // ← THIẾU: Phải require zlib ở đầu file
+const zlib = require('zlib'); // ✅ ĐÃ THÊM
+const { URL } = require('url'); // ✅ THÊM URL PARSER
 
 const app = express();
 
@@ -20,105 +21,149 @@ app.use((req, res, next) => {
   next();
 });
 
-// ========== FETCH HELPER ==========
+// ========== FETCH HELPER (ĐÃ SỬA LỖI) ==========
 function fetchUrl(url) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
     
+    // ✅ THÊM XỬ LÝ URL PARAMS
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (e) {
+      return reject(new Error('Invalid URL: ' + url));
+    }
+    
     const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (url.startsWith('https') ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
         'Accept-Encoding': 'gzip, deflate, br',
         'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
+        'Pragma': 'no-cache',
+        'Connection': 'close' // ✅ THÊM ĐỂ TRÁNH GIỮ KẾT NỐI LÂU
       },
-      timeout: 15000 // ← THIẾU: Timeout 15 giây tránh treo
+      timeout: 15000 // ✅ ĐÃ CÓ TIMEOUT
     };
     
-    const request = client.get(url, options, (res) => {
-      // Handle redirect
+    console.log(`🌐 Fetching: ${url}`);
+    
+    const request = client.request(options, (res) => {
+      // ✅ XỬ LÝ REDIRECT ĐÚNG CÁCH
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        const redirectUrl = new URL(res.headers.location, url).href;
+        let redirectUrl = res.headers.location;
+        if (!redirectUrl.startsWith('http://') && !redirectUrl.startsWith('https://')) {
+          redirectUrl = new URL(redirectUrl, url).href;
+        } else {
+          redirectUrl = new URL(redirectUrl).href;
+        }
         console.log(`↪️ Redirect to: ${redirectUrl}`);
         return fetchUrl(redirectUrl).then(resolve).catch(reject);
       }
       
+      // ✅ CHECK STATUS CODE
+      if (res.statusCode >= 400) {
+        return reject(new Error(`HTTP ${res.statusCode}: ${res.statusMessage}`));
+      }
+      
       let data = [];
       
-      // Handle gzip/deflate/brotli
+      // ✅ XỬ LÝ COMPRESSION
       let stream = res;
       const encoding = res.headers['content-encoding'];
       
-      if (encoding === 'gzip') {
-        stream = res.pipe(zlib.createGunzip());
-      } else if (encoding === 'deflate') {
-        stream = res.pipe(zlib.createInflate());
-      } else if (encoding === 'br') {
-        stream = res.pipe(zlib.createBrotliDecompress());
+      try {
+        if (encoding === 'gzip') {
+          stream = res.pipe(zlib.createGunzip());
+        } else if (encoding === 'deflate') {
+          stream = res.pipe(zlib.createInflate());
+        } else if (encoding === 'br') {
+          stream = res.pipe(zlib.createBrotliDecompress());
+        }
+      } catch (e) {
+        return reject(new Error(`Decompression error: ${e.message}`));
       }
       
-      stream.on('data', (chunk) => data.push(chunk));
-      stream.on('end', () => {
-        const html = Buffer.concat(data).toString();
-        resolve({
-          html: html,
-          headers: res.headers,
-          statusCode: res.statusCode,
-          contentType: res.headers['content-type'] || 'text/html'
-        });
+      stream.on('data', (chunk) => {
+        data.push(chunk);
       });
-      stream.on('error', reject);
+      
+      stream.on('end', () => {
+        try {
+          const html = Buffer.concat(data).toString('utf8');
+          resolve({
+            html: html,
+            headers: res.headers,
+            statusCode: res.statusCode,
+            contentType: res.headers['content-type'] || 'text/html'
+          });
+        } catch (e) {
+          reject(new Error(`Parse error: ${e.message}`));
+        }
+      });
+      
+      stream.on('error', (e) => {
+        reject(new Error(`Stream error: ${e.message}`));
+      });
     });
     
-    request.on('error', reject);
+    request.on('error', (e) => {
+      reject(new Error(`Request error: ${e.message}`));
+    });
+    
     request.on('timeout', () => {
       request.destroy();
-      reject(new Error('Request timeout'));
+      reject(new Error('Request timeout after 15s'));
     });
+    
+    request.end();
   });
 }
 
-// ========== REMOVE ERUDA FROM HTML ==========
+// ========== REMOVE ERUDA TỪ HTML ==========
 function removeEruda(html) {
-  // Xóa script tags chứa eruda
-  html = html.replace(/<script[^>]*?src=["'][^"']*eruda[^"']*["'][^>]*?><\/script>/gi, '<!-- Eruda removed -->');
-  html = html.replace(/<script[^>]*?src=["'][^"']*eruda[^"']*["'][^>]*?>.*?<\/script>/gi, '<!-- Eruda removed -->');
+  if (!html) return html;
   
-  // Xóa inline script eruda
-  html = html.replace(/<script>[\s\S]*?eruda[\s\S]*?<\/script>/gi, '<!-- Eruda inline removed -->');
-  
-  // Disable eruda.init()
-  html = html.replace(/eruda\s*\.\s*init\s*\(/gi, '(function(){console.log("Eruda blocked")})(');
-  
-  // Xóa window.eruda references
-  html = html.replace(/window\s*\.\s*eruda/gi, 'undefined');
-  
-  console.log('🔧 Eruda removed from HTML');
-  return html;
-}
-
-// ========== INJECT TAPMONKEY SCRIPT ==========
-function injectTapmonkeyScript(html, tapmonkeyCode) {
-  if (!tapmonkeyCode) {
-    console.warn('⚠️ No TapMonkey code to inject');
+  try {
+    // Xóa script eruda
+    let cleaned = html.replace(/<script[^>]*?eruda[^>]*?>[^<]*?<\/script>/gi, '<!-- Eruda removed -->');
+    cleaned = cleaned.replace(/<script[^>]*?src=["'][^"']*?eruda[^"']*?["'][^>]*?><\/script>/gi, '<!-- Eruda removed -->');
+    
+    // Disable eruda
+    cleaned = cleaned.replace(/eruda\s*\.\s*init\s*\(/gi, '(function(){console.log("🔧 Eruda blocked")})(');
+    cleaned = cleaned.replace(/window\s*\.\s*eruda/gi, 'undefined');
+    cleaned = cleaned.replace(/\beruda\b/g, 'undefined');
+    
+    console.log('🔧 Eruda removed successfully');
+    return cleaned;
+  } catch (e) {
+    console.warn('⚠️ Error removing Eruda:', e.message);
     return html;
   }
+}
+
+// ========== INJECT TAPMONKEY ==========
+function injectTapmonkeyScript(html, tapmonkeyCode) {
+  if (!tapmonkeyCode || !html) return html;
   
-  const injectionCode = `
-<!-- ===== TAPMONKEY AUTO-INJECTED BY CLOUD BROWSER ===== -->
+  try {
+    const injectionCode = `
+<!-- ===== TAPMONKEY AUTO-INJECTED ===== -->
 <script type="text/javascript">
 (function() {
   'use strict';
-  console.log('🎮 TapMonkey Cloud Browser Auto-Inject');
-  console.log('⏰ Time: ' + new Date().toLocaleString('vi-VN'));
+  console.log('🎮 TapMonkey Auto-Inject');
   
   // Block Eruda errors
-  var originalOnError = window.onerror;
+  const originalOnError = window.onerror;
   window.onerror = function(msg, url, line, col, error) {
     if (msg && (msg.includes('eruda') || msg.includes('Eruda'))) {
-      return true; // Chặn lỗi Eruda
+      return true;
     }
     if (originalOnError) {
       return originalOnError.apply(this, arguments);
@@ -126,10 +171,10 @@ function injectTapmonkeyScript(html, tapmonkeyCode) {
     return false;
   };
   
-  // Execute TapMonkey code
+  // Execute TapMonkey
   try {
     ${tapmonkeyCode}
-    console.log('✅ TapMonkey executed successfully');
+    console.log('✅ TapMonkey executed');
   } catch(e) {
     console.error('❌ TapMonkey error:', e.message);
   }
@@ -137,69 +182,78 @@ function injectTapmonkeyScript(html, tapmonkeyCode) {
 </script>
 <!-- ===== END TAPMONKEY ===== -->
 `;
-  
-  // Inject before </body> or </html> or end of file
-  if (html.includes('</body>')) {
-    return html.replace('</body>', injectionCode + '\n</body>');
-  } else if (html.includes('</html>')) {
-    return html.replace('</html>', injectionCode + '\n</html>');
-  } else {
-    return html + '\n' + injectionCode;
+    
+    // Inject before </body>
+    if (html.includes('</body>')) {
+      return html.replace('</body>', injectionCode + '\n</body>');
+    } else if (html.includes('</html>')) {
+      return html.replace('</html>', injectionCode + '\n</html>');
+    } else {
+      return html + '\n' + injectionCode;
+    }
+  } catch (e) {
+    console.warn('⚠️ Error injecting TapMonkey:', e.message);
+    return html;
   }
 }
 
-// ========== PROXY ROUTE ==========
+// ========== PROXY ROUTE (CHÍNH) ==========
 app.get('/proxy', async (req, res) => {
   try {
-    let targetUrl = req.query.url;
+    let targetUrl = req.query.url || 'https://f1686s.com/home/mine';
     
-    if (!targetUrl) {
-      targetUrl = 'https://f1686s.com/home/mine';
-    }
-    
-    // Decode URL if needed
+    // ✅ XỬ LÝ URL TỐT HƠN
     try {
       targetUrl = decodeURIComponent(targetUrl);
-    } catch(e) {}
+    } catch(e) {
+      // Nếu decode lỗi, giữ nguyên
+    }
     
-    // Add https if missing
+    // Chuẩn hóa URL
     if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
       targetUrl = 'https://' + targetUrl;
     }
     
     console.log(`🌐 Proxying: ${targetUrl}`);
     
-    // Fetch target URL
+    // Fetch
     const result = await fetchUrl(targetUrl);
     
-    // Read TapMonkey script
+    // Đọc TapMonkey
     let tapmonkeyCode = '';
     const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
     
     if (fs.existsSync(tapmonkeyPath)) {
-      tapmonkeyCode = fs.readFileSync(tapmonkeyPath, 'utf8');
-      console.log('✅ TapMonkey script loaded (' + (tapmonkeyCode.length / 1024).toFixed(1) + 'KB)');
+      try {
+        tapmonkeyCode = fs.readFileSync(tapmonkeyPath, 'utf8');
+        console.log(`✅ TapMonkey loaded (${(tapmonkeyCode.length / 1024).toFixed(1)}KB)`);
+      } catch (e) {
+        console.warn('⚠️ Cannot read TapMonkey:', e.message);
+      }
     } else {
-      console.warn('⚠️ TapMonkey script not found, serving without injection');
+      console.warn('⚠️ TapMonkey file missing:', tapmonkeyPath);
     }
     
-    // Process HTML
-    let modifiedHtml = result.html;
+    // Xử lý HTML
+    let modifiedHtml = result.html || '';
     
-    // Step 1: Remove Eruda
+    // Bước 1: Remove Eruda
     modifiedHtml = removeEruda(modifiedHtml);
     
-    // Step 2: Inject TapMonkey
+    // Bước 2: Inject TapMonkey
     if (tapmonkeyCode) {
       modifiedHtml = injectTapmonkeyScript(modifiedHtml, tapmonkeyCode);
-      console.log('💉 TapMonkey injected into HTML');
+      console.log('💉 TapMonkey injected');
     }
     
-    // Send response
-    res.set('Content-Type', result.contentType || 'text/html; charset=utf-8');
-    res.set('Access-Control-Allow-Origin', '*');
-    res.set('X-Proxy-By', 'CloudBrowser-v4');
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    // Gửi response
+    const contentType = result.contentType || 'text/html; charset=utf-8';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Proxy-By', 'CloudBrowser-v5');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    
     res.send(modifiedHtml);
     
   } catch (error) {
@@ -212,611 +266,213 @@ app.get('/proxy', async (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>❌ Proxy Error</title>
         <style>
-          body { font-family: Arial, sans-serif; padding: 20px; text-align: center; }
+          body { font-family: sans-serif; padding: 30px; text-align: center; background: #f5f5f5; }
           h1 { color: #f44336; }
           p { color: #666; margin: 10px 0; }
-          a { color: #667eea; }
+          a { color: #667eea; text-decoration: none; }
+          .box { background: white; padding: 30px; border-radius: 10px; max-width: 500px; margin: 30px auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         </style>
       </head>
       <body>
-        <h1>❌ Proxy Error</h1>
-        <p>${error.message}</p>
-        <p><small>Có thể trang web đã chặn proxy hoặc không phản hồi</small></p>
-        <a href="/">🔙 Quay về Cloud Browser</a>
+        <div class="box">
+          <h1>❌ Proxy Error</h1>
+          <p>${error.message}</p>
+          <p><small>Không thể tải trang web</small></p>
+          <a href="/">🔙 Quay về Cloud Browser</a>
+        </div>
       </body>
       </html>
     `);
   }
 });
 
-// ========== MAIN ROUTE - CLOUD BROWSER ==========
+// ========== MAIN ROUTE ==========
 app.get('/', (req, res) => {
-  try {
-    const defaultUrl = 'https://f1686s.com/home/mine';
+  const defaultUrl = 'https://f1686s.com/home/mine';
+  
+  const html = `
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>☁️ Cloud Browser</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, sans-serif; background: #f5f5f5; }
+    body { display: flex; flex-direction: column; }
+    .toolbar { background: linear-gradient(135deg, #667eea, #764ba2); padding: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex-shrink: 0; }
+    .toolbar-title { color: white; font-weight: 600; font-size: 13px; white-space: nowrap; }
+    .btn { background: rgba(255,255,255,0.2); color: white; border: none; padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; touch-action: manipulation; }
+    .btn:active { transform: scale(0.95); background: rgba(255,255,255,0.3); }
+    .btn:disabled { opacity: 0.4; }
+    .btn-highlight { background: #4caf50; border: 2px solid #45a049; font-weight: 700; }
+    .address-bar { flex: 1; padding: 6px 10px; border: none; border-radius: 5px; font-size: 12px; min-width: 120px; }
+    .address-bar:focus { outline: none; }
+    .go-btn { background: white; color: #667eea; border: none; padding: 6px 14px; border-radius: 5px; font-weight: 600; cursor: pointer; }
+    .browser-container { flex: 1; background: white; overflow: hidden; min-height: 0; }
+    .loading-bar { height: 3px; background: linear-gradient(90deg, #667eea, #764ba2); width: 0%; transition: width 0.3s; flex-shrink: 0; }
+    .loading-bar.active { animation: loading 2s ease-in-out; }
+    @keyframes loading { 0% { width: 0%; } 50% { width: 85%; } 100% { width: 100%; } }
+    iframe { width: 100%; height: 100%; border: none; display: block; }
+    .info-bar { background: #f9f9f9; padding: 6px 10px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #999; flex-shrink: 0; flex-wrap: wrap; gap: 4px; }
+    .badge { background: #4caf50; color: white; padding: 2px 8px; border-radius: 8px; font-weight: 600; font-size: 9px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #4caf50; display: inline-block; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    @media (max-width: 480px) { .toolbar { padding: 6px; gap: 4px; } .btn { padding: 4px 8px; font-size: 11px; } }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <span class="toolbar-title">☁️</span>
+    <button class="btn" id="backBtn">◀</button>
+    <button class="btn" id="forwardBtn">▶</button>
+    <button class="btn" id="refreshBtn">🔄</button>
+    <button class="btn btn-highlight" id="homeBtn">🏠</button>
+    <input type="text" class="address-bar" id="addressBar" value="${defaultUrl}">
+    <button class="go-btn" id="goBtn">Go</button>
+  </div>
+  
+  <div class="browser-container">
+    <div class="loading-bar" id="loadingBar"></div>
+    <iframe id="browserFrame" src="/proxy?url=${encodeURIComponent(defaultUrl)}" 
+      sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-top-navigation allow-modals">
+    </iframe>
+  </div>
+  
+  <div class="info-bar">
+    <span><span class="status-dot"></span> Online</span>
+    <span class="badge">🎮 TapMonkey</span>
+    <span id="urlDisplay">${defaultUrl}</span>
+  </div>
 
-    const html = `
-    <!DOCTYPE html>
-    <html lang="vi">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-      <meta http-equiv="X-UA-Compatible" content="ie=edge">
-      <meta name="apple-mobile-web-app-capable" content="yes">
-      <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-      <meta name="theme-color" content="#667eea">
-      <meta name="format-detection" content="telephone=no">
-      <title>☁️ Cloud Browser - Auto TapMonkey</title>
-      <style>
-        * {
-          margin: 0;
-          padding: 0;
-          box-sizing: border-box;
-          -webkit-tap-highlight-color: transparent;
-          -webkit-user-select: none;
-          user-select: none;
-          -webkit-touch-callout: none;
+  <script>
+    (function() {
+      const addressBar = document.getElementById('addressBar');
+      const browserFrame = document.getElementById('browserFrame');
+      const loadingBar = document.getElementById('loadingBar');
+      const urlDisplay = document.getElementById('urlDisplay');
+      const backBtn = document.getElementById('backBtn');
+      const forwardBtn = document.getElementById('forwardBtn');
+      const refreshBtn = document.getElementById('refreshBtn');
+      const homeBtn = document.getElementById('homeBtn');
+      const goBtn = document.getElementById('goBtn');
+      
+      const defaultUrl = '${defaultUrl}';
+      let history = [defaultUrl];
+      let historyIndex = 0;
+      
+      function navigate(url) {
+        if (!url) return;
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          url = 'https://' + url;
         }
-
-        html, body {
-          width: 100%;
-          height: 100%;
-          position: fixed;
-          overflow: hidden;
-          -webkit-font-smoothing: antialiased;
-          -webkit-text-size-adjust: 100%;
+        try { new URL(url); } catch(e) { return; }
+        
+        const proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+        browserFrame.src = proxyUrl;
+        addressBar.value = url;
+        urlDisplay.textContent = url;
+        
+        if (history[historyIndex] !== url) {
+          history = history.slice(0, historyIndex + 1);
+          history.push(url);
+          historyIndex++;
         }
-
-        body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          background: #f5f5f5;
-          display: flex;
-          flex-direction: column;
-          touch-action: manipulation;
-        }
-
-        .status-bar {
-          height: env(safe-area-inset-top, 0px);
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          flex-shrink: 0;
-        }
-
-        .toolbar {
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          padding: 12px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-          flex-shrink: 0;
-          flex-wrap: wrap;
-          min-height: 50px;
-        }
-
-        .toolbar-title {
-          color: white;
-          font-weight: 600;
-          font-size: 14px;
-          white-space: nowrap;
-          flex-shrink: 0;
-        }
-
-        .toolbar-buttons {
-          display: flex;
-          gap: 6px;
-          flex-shrink: 0;
-          flex-wrap: wrap;
-        }
-
-        .btn {
-          background: rgba(255, 255, 255, 0.2);
-          color: white;
-          border: none;
-          padding: 7px 10px;
-          border-radius: 6px;
-          cursor: pointer;
-          font-size: 12px;
-          font-weight: 500;
-          transition: all 0.2s;
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          white-space: nowrap;
-          touch-action: manipulation;
-        }
-
-        .btn:active {
-          background: rgba(255, 255, 255, 0.3);
-          transform: scale(0.95);
-        }
-
-        .btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .btn-highlight {
-          background: #4caf50;
-          border: 2px solid #45a049;
-          box-shadow: 0 0 10px rgba(76, 175, 80, 0.3);
-          font-weight: 700;
-          animation: glow 2s ease-in-out infinite;
-        }
-
-        @keyframes glow {
-          0%, 100% { box-shadow: 0 0 10px rgba(76, 175, 80, 0.3); }
-          50% { box-shadow: 0 0 20px rgba(76, 175, 80, 0.6); }
-        }
-
-        .address-bar-container {
-          flex: 1;
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          min-width: 150px;
-        }
-
-        .address-bar {
-          flex: 1;
-          padding: 7px 10px;
-          border: none;
-          border-radius: 6px;
-          font-size: 12px;
-          background: rgba(255, 255, 255, 0.95);
-          color: #333;
-          -webkit-appearance: none;
-          appearance: none;
-        }
-
-        .address-bar:focus {
-          outline: none;
-          background: white;
-          box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.4);
-        }
-
-        .go-btn {
-          background: white;
-          color: #667eea;
-          border: none;
-          padding: 7px 14px;
-          border-radius: 6px;
-          cursor: pointer;
-          font-weight: 600;
-          font-size: 11px;
-        }
-
-        .browser-container {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          overflow: hidden;
-          background: white;
-          min-height: 0;
-        }
-
-        .loading-bar {
-          height: 3px;
-          background: linear-gradient(90deg, #667eea, #764ba2);
-          width: 0%;
-          transition: width 0.3s;
-          flex-shrink: 0;
-        }
-
-        .loading-bar.active {
-          animation: loading 2s ease-in-out;
-        }
-
-        @keyframes loading {
-          0% { width: 0%; }
-          50% { width: 85%; }
-          100% { width: 100%; }
-        }
-
-        .browser-frame-container {
-          flex: 1;
-          overflow: hidden;
-          position: relative;
-          min-height: 0;
-        }
-
-        iframe {
-          width: 100%;
-          height: 100%;
-          border: none;
-          background: white;
-          display: block;
-        }
-
-        .info-bar {
-          background: #f9f9f9;
-          padding: 8px 12px;
-          border-top: 1px solid #eee;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          font-size: 11px;
-          color: #999;
-          flex-shrink: 0;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .status-text {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          white-space: nowrap;
-        }
-
-        .status-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          background: #4caf50;
-          animation: pulse 1.5s ease-in-out infinite;
-          flex-shrink: 0;
-        }
-
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
-
-        .url-display {
-          word-break: break-all;
-          flex: 1;
-          min-width: 100px;
-        }
-
-        .tapmonkey-badge {
-          background: #4caf50;
-          color: white;
-          padding: 4px 10px;
-          border-radius: 10px;
-          font-weight: 600;
-          font-size: 10px;
-          animation: pulse 1.5s ease-in-out infinite;
-        }
-
-        @media (max-width: 480px) {
-          .toolbar {
-            min-height: auto;
-            padding: 8px;
-            gap: 6px;
-          }
-
-          .toolbar-title {
-            font-size: 12px;
-            display: none;
-          }
-
-          .btn {
-            padding: 6px 8px;
-            font-size: 11px;
-          }
-
-          .address-bar {
-            font-size: 11px;
-            padding: 6px 8px;
-          }
-
-          .go-btn {
-            padding: 6px 10px;
-            font-size: 10px;
-          }
-
-          .info-bar {
-            font-size: 10px;
-            padding: 6px 8px;
-          }
-        }
-      </style>
-    </head>
-    <body>
-      <div class="status-bar"></div>
-
-      <div class="toolbar">
-        <span class="toolbar-title">☁️ Browser</span>
-        <div class="toolbar-buttons">
-          <button class="btn" id="backBtn" title="Back">◀</button>
-          <button class="btn" id="forwardBtn" title="Forward">▶</button>
-          <button class="btn" id="refreshBtn" title="Refresh">🔄</button>
-          <button class="btn btn-highlight" id="homeBtn" title="Home (Auto TapMonkey)">🏠 🎮</button>
-        </div>
-        <div class="address-bar-container">
-          <input 
-            type="text" 
-            class="address-bar" 
-            id="addressBar" 
-            placeholder="URL"
-            value="${defaultUrl}"
-            autocomplete="off"
-          >
-          <button class="go-btn" id="goBtn">Go</button>
-        </div>
-      </div>
-
-      <div class="browser-container">
-        <div class="loading-bar" id="loadingBar"></div>
-        <div class="browser-frame-container" id="browserContent">
-          <iframe 
-            id="browserFrame" 
-            src="/proxy?url=${encodeURIComponent(defaultUrl)}"
-            sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-top-navigation allow-modals allow-presentation"
-            allow="accelerometer; camera; gyroscope; magnetometer; microphone; payment; usb; geolocation"
-          ></iframe>
-        </div>
-      </div>
-
-      <div class="info-bar">
-        <div class="status-text">
-          <div class="status-dot"></div>
-          <span>✅ Online</span>
-        </div>
-        <span class="tapmonkey-badge">🎮 TapMonkey Auto-Inject</span>
-        <span class="url-display" id="urlDisplay">${defaultUrl}</span>
-      </div>
-
-      <script>
-        'use strict';
-
-        const addressBar = document.getElementById('addressBar');
-        const backBtn = document.getElementById('backBtn');
-        const forwardBtn = document.getElementById('forwardBtn');
-        const refreshBtn = document.getElementById('refreshBtn');
-        const homeBtn = document.getElementById('homeBtn');
-        const goBtn = document.getElementById('goBtn');
-        const browserFrame = document.getElementById('browserFrame');
-        const loadingBar = document.getElementById('loadingBar');
-        const urlDisplay = document.getElementById('urlDisplay');
-
-        const defaultUrl = '${defaultUrl}';
-        let urlHistory = [defaultUrl];
-        let historyIndex = 0;
-
-        // Back Button
-        backBtn.addEventListener('click', () => {
-          if (historyIndex > 0) {
-            historyIndex--;
-            const url = urlHistory[historyIndex];
-            navigateToProxyUrl(url);
-            updateButtons();
-          }
-        });
-
-        // Forward Button
-        forwardBtn.addEventListener('click', () => {
-          if (historyIndex < urlHistory.length - 1) {
-            historyIndex++;
-            const url = urlHistory[historyIndex];
-            navigateToProxyUrl(url);
-            updateButtons();
-          }
-        });
-
-        // Refresh Button
-        refreshBtn.addEventListener('click', () => {
-          const currentUrl = urlHistory[historyIndex] || defaultUrl;
-          navigateToProxyUrl(currentUrl);
-        });
-
-        // Home Button
-        homeBtn.addEventListener('click', () => {
-          navigateToProxyUrl(defaultUrl);
-        });
-
-        // Go Button
-        goBtn.addEventListener('click', () => {
-          navigateFromAddressBar();
-        });
-
-        // Enter Key
-        addressBar.addEventListener('keypress', (e) => {
-          if (e.key === 'Enter') {
-            navigateFromAddressBar();
-          }
-        });
-
-        // Focus
-        addressBar.addEventListener('focus', () => {
-          addressBar.select();
-        });
-
-        // Iframe load handler
-        browserFrame.addEventListener('load', () => {
-          loadingBar.classList.remove('active');
-          console.log('✅ Page loaded with TapMonkey auto-injected');
-        });
-
-        browserFrame.addEventListener('error', () => {
-          console.warn('⚠️ Iframe load error');
-        });
-
-        function navigateFromAddressBar() {
-          let url = addressBar.value.trim();
-          if (!url) return;
-          if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            url = 'https://' + url;
-          }
-          navigateToProxyUrl(url);
-        }
-
-        function navigateToProxyUrl(url) {
-          try {
-            new URL(url);
-            const proxyUrl = '/proxy?url=' + encodeURIComponent(url);
-            
-            browserFrame.src = proxyUrl;
-            addressBar.value = url;
-            urlDisplay.textContent = url;
-
-            if (urlHistory[historyIndex] !== url) {
-              urlHistory = urlHistory.slice(0, historyIndex + 1);
-              urlHistory.push(url);
-              historyIndex++;
-            }
-
-            updateButtons();
-            showLoading();
-            
-            console.log('🌐 Navigated: ' + url);
-            console.log('🎮 TapMonkey will auto-inject');
-          } catch (e) {
-            console.error('Invalid URL:', e.message);
-          }
-        }
-
-        function updateButtons() {
-          backBtn.disabled = historyIndex <= 0;
-          forwardBtn.disabled = historyIndex >= urlHistory.length - 1;
-        }
-
-        function showLoading() {
-          loadingBar.classList.add('active');
-        }
-
-        // Block Eruda errors in parent window too
-        window.addEventListener('error', function(e) {
-          if (e.message && (e.message.includes('eruda') || e.message.includes('Eruda'))) {
-            e.preventDefault();
-            e.stopPropagation();
-            return false;
-          }
-        }, true);
-
         updateButtons();
-
-        console.log('════════════════════════════════════');
-        console.log('☁️ Cloud Browser v4 - Auto TapMonkey');
-        console.log('✅ Server ready');
-        console.log('🎮 TapMonkey: Auto-inject via Proxy');
-        console.log('📦 Script tự động chạy, không cần extension');
-        console.log('════════════════════════════════════');
-      </script>
-    </body>
-    </html>
-    `;
-
-    res.set('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).send('❌ Server Error: ' + error.message);
-  }
+        loadingBar.classList.add('active');
+      }
+      
+      function updateButtons() {
+        backBtn.disabled = historyIndex <= 0;
+        forwardBtn.disabled = historyIndex >= history.length - 1;
+      }
+      
+      // Events
+      goBtn.addEventListener('click', () => navigate(addressBar.value));
+      addressBar.addEventListener('keypress', (e) => { if (e.key === 'Enter') navigate(addressBar.value); });
+      homeBtn.addEventListener('click', () => navigate(defaultUrl));
+      refreshBtn.addEventListener('click', () => navigate(history[historyIndex] || defaultUrl));
+      backBtn.addEventListener('click', () => { if (historyIndex > 0) { historyIndex--; navigate(history[historyIndex]); } });
+      forwardBtn.addEventListener('click', () => { if (historyIndex < history.length - 1) { historyIndex++; navigate(history[historyIndex]); } });
+      
+      browserFrame.addEventListener('load', () => {
+        loadingBar.classList.remove('active');
+        console.log('✅ Page loaded');
+      });
+      
+      updateButtons();
+      console.log('☁️ Cloud Browser v5');
+      console.log('🎮 TapMonkey auto-inject via proxy');
+    })();
+  </script>
+</body>
+</html>
+  `;
+  
+  res.send(html);
 });
 
-// ========== SERVE TAPMONKEY FILE ==========
+// ========== SERVE TAPMONKEY ==========
 app.get('/tapmonkey/:filename', (req, res) => {
-  try {
-    const filename = req.params.filename;
-    
-    if (!/^[\w\-\.]+$/.test(filename)) {
-      return res.status(400).send('Invalid filename');
-    }
-    
-    const filePath = path.join(__dirname, 'public', 'tapmonkey', filename);
-    
-    if (!fs.existsSync(filePath)) {
-      console.warn(`⚠️ File not found: ${filePath}`);
-      return res.status(404).json({ error: `File not found: ${filename}` });
-    }
-    
-    console.log(`✅ Serving: ${filename}`);
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.sendFile(filePath);
-  } catch (error) {
-    console.error('❌ Error serving file:', error);
-    res.status(500).json({ error: 'Error: ' + error.message });
+  const filename = req.params.filename;
+  if (!/^[\w\-\.]+$/.test(filename)) {
+    return res.status(400).send('Invalid filename');
   }
+  
+  const filePath = path.join(__dirname, 'public', 'tapmonkey', filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(filePath);
 });
 
 // ========== API STATUS ==========
 app.get('/api/status', (req, res) => {
   const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
   res.json({
-    status: 'running',
-    server: 'Cloud Browser v4 - Auto TapMonkey',
+    status: 'online',
     tapmonkey: fs.existsSync(tapmonkeyPath) ? 'ready' : 'missing',
-    injection: 'proxy-based auto-inject',
-    eruda: 'blocked',
-    timestamp: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
+    timestamp: new Date().toISOString()
   });
 });
 
-// ========== 404 HANDLER ==========
+// ========== ERROR HANDLING ==========
 app.use((req, res) => {
-  res.status(404).json({ error: 'Not found', path: req.path });
+  res.status(404).json({ error: 'Not found' });
 });
 
-// ========== ERROR HANDLER ==========
 app.use((err, req, res, next) => {
-  console.error('❌ Server Error:', err.message);
-  res.status(500).json({ error: 'Internal server error', message: err.message });
+  console.error('❌ Error:', err.message);
+  res.status(500).json({ error: err.message });
 });
 
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 3000;
-
 const server = app.listen(PORT, '0.0.0.0', () => {
   const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
-  const tapmonkeyReady = fs.existsSync(tapmonkeyPath);
-  
-  console.log('\n');
-  console.log('╔════════════════════════════════════════╗');
-  console.log('║  ☁️  CLOUD BROWSER v4 - RENDER        ║');
-  console.log('║  🎮 TapMonkey AUTO-INJECT (Proxy)    ║');
-  console.log('║  🔧 Eruda Auto-Blocked               ║');
-  console.log('╚════════════════════════════════════════╝');
-  console.log('');
-  console.log(`✅ Server started`);
-  console.log(`📍 Port: ${PORT}`);
-  console.log(`🌐 URL: https://f1686s.com/home/mine`);
-  console.log(`💉 Injection: Proxy-based (auto)`);
-  console.log(`🔧 Eruda: Auto-blocked`);
-  console.log(`📦 TapMonkey: ${tapmonkeyReady ? '✅ READY' : '❌ MISSING - Add file to public/tapmonkey/'}`);
-  console.log(`⏰ Time: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`);
-  console.log('');
-  
-  if (!tapmonkeyReady) {
-    console.warn('⚠️  TAPMONKEY FILE NOT FOUND!');
-    console.warn('⚠️  Create: public/tapmonkey/f1686s_naptien.js');
-    console.log('');
-  }
-});
-
-// ========== GRACEFUL SHUTDOWN ==========
-process.on('SIGTERM', () => {
-  console.log('\n✅ SIGTERM received - shutting down gracefully...');
-  server.close(() => {
-    console.log('✅ Server closed successfully');
-    process.exit(0);
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('\n✅ SIGINT received - shutting down gracefully...');
-  server.close(() => {
-    console.log('✅ Server closed successfully');
-    process.exit(0);
-  });
-});
-
-// ========== UNCAUGHT ERRORS ==========
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err.message);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection:', reason);
+  console.log(`
+╔════════════════════════════════════════╗
+║  ☁️  CLOUD BROWSER v5 - RENDER        ║
+║  🎮 TapMonkey Auto-Inject             ║
+║  🔧 Eruda Auto-Blocked                ║
+╚════════════════════════════════════════╝
+✅ Port: ${PORT}
+🎮 TapMonkey: ${fs.existsSync(tapmonkeyPath) ? '✅ READY' : '❌ MISSING'}
+⏰ ${new Date().toLocaleString('vi-VN')}
+  `);
 });
 
 // ========== KEEP ALIVE ==========
 setInterval(() => {
-  const appUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-  const client = appUrl.startsWith('https') ? https : http;
-  client.get(appUrl + '/api/status', (res) => {
-    console.log('💓 Keep-alive ping sent');
-  }).on('error', (err) => {
-    console.log('⚠️ Keep-alive ping failed: ' + err.message);
-  });
-}, 600000); // 10 minutes
+  const url = process.env.RENDER_EXTERNAL_URL || 'http://localhost:' + PORT;
+  const client = url.startsWith('https') ? https : http;
+  client.get(url + '/api/status', () => {}).on('error', () => {});
+}, 600000);
+
+// ========== GRACEFUL SHUTDOWN ==========
+process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
+process.on('SIGINT', () => { server.close(() => process.exit(0)); });
