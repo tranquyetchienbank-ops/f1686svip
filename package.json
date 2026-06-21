@@ -1,7 +1,7 @@
 {
-  "name": "cloud-browser",
-  "version": "6.0.0",
-  "description": "Cloud Browser with TapMonkey auto-inject",
+  "name": "cloud-chrome",
+  "version": "1.0.0",
+  "description": "Cloud Chrome Browser with TapMonkey Extension",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
