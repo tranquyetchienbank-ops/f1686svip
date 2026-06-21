@@ -20,7 +20,6 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
   try {
     const webLink = 'https://f1686s.com/home/mine';
-    const tapmonkeyFile = 'tapmonkey/f1686s_naptien.js';
 
     const html = `
     <!DOCTYPE html>
@@ -56,7 +55,7 @@ app.get('/', (req, res) => {
         }
 
         body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
           background: #f5f5f5;
           display: flex;
           flex-direction: column;
@@ -110,8 +109,6 @@ app.get('/', (req, res) => {
           gap: 4px;
           white-space: nowrap;
           touch-action: manipulation;
-          -webkit-user-select: none;
-          user-select: none;
         }
 
         .btn:active {
@@ -140,8 +137,6 @@ app.get('/', (req, res) => {
           font-size: 12px;
           background: rgba(255, 255, 255, 0.95);
           color: #333;
-          transition: all 0.2s;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
           -webkit-appearance: none;
           appearance: none;
         }
@@ -161,14 +156,8 @@ app.get('/', (req, res) => {
           cursor: pointer;
           font-weight: 600;
           font-size: 11px;
-          transition: all 0.2s;
-          touch-action: manipulation;
           -webkit-appearance: none;
           appearance: none;
-        }
-
-        .go-btn:active {
-          transform: scale(0.95);
         }
 
         .browser-container {
@@ -211,54 +200,6 @@ app.get('/', (req, res) => {
           border: none;
           background: white;
           display: block;
-        }
-
-        .error-container {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          background: white;
-          color: #666;
-          text-align: center;
-          padding: max(40px, env(safe-area-inset-left)) max(40px, env(safe-area-inset-right)) max(40px, env(safe-area-inset-bottom));
-        }
-
-        .error-icon {
-          font-size: 48px;
-          margin-bottom: 16px;
-        }
-
-        .error-title {
-          font-size: 18px;
-          font-weight: 600;
-          margin-bottom: 8px;
-          color: #333;
-        }
-
-        .error-message {
-          font-size: 13px;
-          color: #999;
-          margin-bottom: 24px;
-        }
-
-        .retry-btn {
-          background: #667eea;
-          color: white;
-          border: none;
-          padding: 10px 24px;
-          border-radius: 6px;
-          cursor: pointer;
-          font-weight: 600;
-          transition: all 0.2s;
-          touch-action: manipulation;
-          -webkit-appearance: none;
-          appearance: none;
-        }
-
-        .retry-btn:active {
-          transform: scale(0.95);
         }
 
         .info-bar {
@@ -334,15 +275,69 @@ app.get('/', (req, res) => {
             padding: 6px 8px;
           }
         }
+      </style>
 
-        @media (hover: none) and (pointer: coarse) {
-          .btn:active,
-          .go-btn:active,
-          .retry-btn:active {
-            transform: scale(0.95);
+      <script>
+        // ========== DEFINE FUNCTIONS FIRST (BEFORE BODY) ==========
+        function onFrameLoad() {
+          const loadingBar = document.getElementById('loadingBar');
+          if (loadingBar) {
+            loadingBar.classList.remove('active');
+          }
+          console.log('✅ Frame loaded');
+          
+          // ========== LOAD TAPMONKEY SCRIPT ==========
+          try {
+            const iframe = document.getElementById('browserFrame');
+            if (!iframe) {
+              console.warn('⚠️ Iframe not found');
+              return;
+            }
+            
+            setTimeout(() => {
+              try {
+                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                
+                if (!iframeDoc) {
+                  console.warn('⚠️ Cannot access iframe document (same-origin policy)');
+                  return;
+                }
+                
+                // Check if script already exists
+                if (iframeDoc.getElementById('tapmonkey-script')) {
+                  console.log('✅ TapMonkey already loaded');
+                  return;
+                }
+                
+                const script = iframeDoc.createElement('script');
+                script.id = 'tapmonkey-script';
+                script.src = '/tapmonkey/f1686s_naptien.js';
+                script.type = 'text/javascript';
+                script.async = true;
+                
+                script.onerror = () => {
+                  console.error('❌ TapMonkey load failed - Check file exists at /tapmonkey/f1686s_naptien.js');
+                };
+                
+                script.onload = () => {
+                  console.log('✅ TapMonkey script loaded successfully');
+                };
+                
+                iframeDoc.body.appendChild(script);
+                console.log('📦 TapMonkey script injected into iframe');
+              } catch (e) {
+                console.warn('⚠️ Cannot inject TapMonkey:', e.message);
+              }
+            }, 500);
+          } catch (e) {
+            console.error('❌ Error in onFrameLoad:', e.message);
           }
         }
-      </style>
+
+        function onFrameError() {
+          console.warn('⚠️ Iframe load error');
+        }
+      </script>
     </head>
     <body>
       <div class="status-bar"></div>
@@ -363,9 +358,6 @@ app.get('/', (req, res) => {
             placeholder="URL"
             value="https://f1686s.com/home/mine"
             autocomplete="off"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
           >
           <button class="go-btn" id="goBtn">Go</button>
         </div>
@@ -382,7 +374,6 @@ app.get('/', (req, res) => {
             onload="onFrameLoad()"
             onerror="onFrameError()"
           ></iframe>
-          <script src="tapmonkey/f1686s_naptien.js"></script>
         </div>
       </div>
 
@@ -406,7 +397,6 @@ app.get('/', (req, res) => {
         const browserFrame = document.getElementById('browserFrame');
         const loadingBar = document.getElementById('loadingBar');
         const urlDisplay = document.getElementById('urlDisplay');
-        const browserContent = document.getElementById('browserContent');
 
         const defaultUrl = 'https://f1686s.com/home/mine';
         let urlHistory = [defaultUrl];
@@ -456,20 +446,16 @@ app.get('/', (req, res) => {
 
         function navigateFromAddressBar() {
           let url = addressBar.value.trim();
-          
           if (!url) return;
-
           if (!url.startsWith('http://') && !url.startsWith('https://')) {
             url = 'https://' + url;
           }
-
           navigateToUrl(url);
         }
 
         function navigateToUrl(url) {
           try {
             new URL(url);
-            
             browserFrame.src = url;
             addressBar.value = url;
             urlDisplay.textContent = url;
@@ -483,7 +469,7 @@ app.get('/', (req, res) => {
             updateButtons();
             showLoading();
           } catch (e) {
-            showError('❌ URL sai', 'Vui lòng nhập URL hợp lệ');
+            console.error('Invalid URL');
           }
         }
 
@@ -496,32 +482,12 @@ app.get('/', (req, res) => {
           loadingBar.classList.add('active');
         }
 
-        function onFrameLoad() {
-          loadingBar.classList.remove('active');
-          console.log('✅ Frame loaded');
-        }
-
-        function onFrameError() {
-          console.warn('⚠️ Frame error');
-        }
-
-        function showError(title, message) {
-          browserContent.innerHTML = \`
-            <div class="error-container">
-              <div class="error-icon">⚠️</div>
-              <div class="error-title">\${title}</div>
-              <div class="error-message">\${message}</div>
-              <button class="retry-btn" onclick="location.reload()">Thử lại</button>
-            </div>
-          \`;
-        }
-
         updateButtons();
 
         console.log('════════════════════════════════════');
-        console.log('☁️ Cloud Browser Started');
-        console.log('Default URL: https://f1686s.com/home/mine');
-        console.log('TapMonkey: Loaded');
+        console.log('☁️ Cloud Browser v3');
+        console.log('✅ Server ready');
+        console.log('📦 TapMonkey: Auto-inject enabled');
         console.log('════════════════════════════════════');
       </script>
     </body>
@@ -549,15 +515,16 @@ app.get('/tapmonkey/:filename', (req, res) => {
     
     if (!fs.existsSync(filePath)) {
       console.warn(`⚠️ File not found: ${filePath}`);
-      return res.status(404).send(`File not found: ${filename}`);
+      return res.status(404).json({ error: `File not found: ${filename}` });
     }
     
     console.log(`✅ Serving: ${filename}`);
     res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.sendFile(filePath);
   } catch (error) {
     console.error('❌ Error serving file:', error);
-    res.status(500).send('Error: ' + error.message);
+    res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
@@ -565,10 +532,30 @@ app.get('/tapmonkey/:filename', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'running',
-    server: 'Cloud Browser',
-    uptime: process.uptime(),
+    server: 'Cloud Browser v3',
+    tapmonkey: 'enabled',
     timestamp: new Date().toLocaleString('vi-VN')
   });
+});
+
+// ========== API DEBUG ==========
+app.get('/api/files', (req, res) => {
+  try {
+    const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey');
+    let files = [];
+    
+    if (fs.existsSync(tapmonkeyPath)) {
+      files = fs.readdirSync(tapmonkeyPath);
+    }
+    
+    res.json({
+      tapmonkeyFolder: 'exists',
+      files: files,
+      path: tapmonkeyPath
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ========== 404 HANDLER ==========
@@ -588,13 +575,14 @@ const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   console.log('\n');
   console.log('╔════════════════════════════════════════╗');
-  console.log('║      ☁️  CLOUD BROWSER - RENDER         ║');
+  console.log('║  ☁️  CLOUD BROWSER v3 - RENDER         ║');
+  console.log('║  TapMonkey Auto-Inject (FIXED)         ║');
   console.log('╚════════════════════════════════════════╝');
   console.log('');
-  console.log(`✅ Server started successfully`);
+  console.log(`✅ Server started`);
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌐 URL: https://f1686s.com/home/mine`);
-  console.log(`📦 TapMonkey: Loaded`);
+  console.log(`📦 TapMonkey: Auto-inject on iframe load`);
   console.log(`⏰ Time: ${new Date().toLocaleString('vi-VN')}`);
   console.log('');
 });
