@@ -1,7 +1,6 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-require('dotenv').config();
 
 const app = express();
 
@@ -12,7 +11,9 @@ app.use(express.urlencoded({ extended: true }));
 
 // ========== LOGGING ==========
 app.use((req, res, next) => {
-  console.log(`[${new Date().toLocaleString('vi-VN')}] ${req.method} ${req.path}`);
+  const now = new Date();
+  const timeStr = now.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+  console.log(`[${timeStr}] ${req.method} ${req.path}`);
   next();
 });
 
@@ -63,14 +64,14 @@ app.get('/', (req, res) => {
         }
 
         .status-bar {
-          height: env(safe-area-inset-top);
+          height: env(safe-area-inset-top, 0px);
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
           flex-shrink: 0;
         }
 
         .toolbar {
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          padding: max(12px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-right)) 12px;
+          padding: 12px;
           display: flex;
           align-items: center;
           gap: 8px;
@@ -156,8 +157,6 @@ app.get('/', (req, res) => {
           cursor: pointer;
           font-weight: 600;
           font-size: 11px;
-          -webkit-appearance: none;
-          appearance: none;
         }
 
         .browser-container {
@@ -204,7 +203,7 @@ app.get('/', (req, res) => {
 
         .info-bar {
           background: #f9f9f9;
-          padding: 8px max(12px, env(safe-area-inset-left)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-right));
+          padding: 8px 12px;
           border-top: 1px solid #eee;
           display: flex;
           justify-content: space-between;
@@ -246,7 +245,7 @@ app.get('/', (req, res) => {
         @media (max-width: 480px) {
           .toolbar {
             min-height: auto;
-            padding: 8px 8px;
+            padding: 8px;
             gap: 6px;
           }
 
@@ -300,6 +299,7 @@ app.get('/', (req, res) => {
                 
                 if (!iframeDoc) {
                   console.warn('⚠️ Cannot access iframe document (same-origin policy)');
+                  console.warn('⚠️ TapMonkey can only be injected on same-origin pages');
                   return;
                 }
                 
@@ -323,10 +323,15 @@ app.get('/', (req, res) => {
                   console.log('✅ TapMonkey script loaded successfully');
                 };
                 
-                iframeDoc.body.appendChild(script);
-                console.log('📦 TapMonkey script injected into iframe');
+                if (iframeDoc.body) {
+                  iframeDoc.body.appendChild(script);
+                  console.log('📦 TapMonkey script injected into iframe');
+                } else {
+                  console.warn('⚠️ Iframe body not ready yet');
+                }
               } catch (e) {
                 console.warn('⚠️ Cannot inject TapMonkey:', e.message);
+                console.warn('⚠️ This is expected for cross-origin iframes');
               }
             }, 500);
           } catch (e) {
@@ -469,7 +474,7 @@ app.get('/', (req, res) => {
             updateButtons();
             showLoading();
           } catch (e) {
-            console.error('Invalid URL');
+            console.error('Invalid URL:', e.message);
           }
         }
 
@@ -534,7 +539,7 @@ app.get('/api/status', (req, res) => {
     status: 'running',
     server: 'Cloud Browser v3',
     tapmonkey: 'enabled',
-    timestamp: new Date().toLocaleString('vi-VN')
+    timestamp: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
   });
 });
 
@@ -549,7 +554,7 @@ app.get('/api/files', (req, res) => {
     }
     
     res.json({
-      tapmonkeyFolder: 'exists',
+      tapmonkeyFolder: fs.existsSync(tapmonkeyPath) ? 'exists' : 'not found',
       files: files,
       path: tapmonkeyPath
     });
@@ -565,14 +570,14 @@ app.use((req, res) => {
 
 // ========== ERROR HANDLER ==========
 app.use((err, req, res, next) => {
-  console.error('❌ Error:', err);
+  console.error('❌ Error:', err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 3000;
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n');
   console.log('╔════════════════════════════════════════╗');
   console.log('║  ☁️  CLOUD BROWSER v3 - RENDER         ║');
@@ -583,14 +588,34 @@ const server = app.listen(PORT, () => {
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌐 URL: https://f1686s.com/home/mine`);
   console.log(`📦 TapMonkey: Auto-inject on iframe load`);
-  console.log(`⏰ Time: ${new Date().toLocaleString('vi-VN')}`);
+  console.log(`⏰ Time: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`);
   console.log('');
 });
 
+// ========== GRACEFUL SHUTDOWN ==========
 process.on('SIGTERM', () => {
-  console.log('\n✅ Server shutting down...');
+  console.log('\n✅ SIGTERM received - shutting down gracefully...');
   server.close(() => {
-    console.log('Server closed');
+    console.log('✅ Server closed successfully');
     process.exit(0);
   });
 });
+
+process.on('SIGINT', () => {
+  console.log('\n✅ SIGINT received - shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Server closed successfully');
+    process.exit(0);
+  });
+});
+
+// ========== KEEP ALIVE (Prevent Render sleep) ==========
+const https = require('https');
+setInterval(() => {
+  const appUrl = process.env.RENDER_EXTERNAL_URL || 'https://f1686s-com-render.onrender.com';
+  https.get(appUrl, (res) => {
+    console.log('💓 Keep-alive ping sent');
+  }).on('error', (err) => {
+    console.log('⚠️ Keep-alive ping failed');
+  });
+}, 600000); // 10 minutes
