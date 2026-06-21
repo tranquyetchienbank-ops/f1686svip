@@ -1,6 +1,8 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
 
 const app = express();
 
@@ -17,10 +19,155 @@ app.use((req, res, next) => {
   next();
 });
 
+// ========== FETCH HELPER ==========
+function fetchUrl(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    
+    const options = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      }
+    };
+    
+    client.get(url, options, (res) => {
+      // Handle redirect
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        const redirectUrl = new URL(res.headers.location, url).href;
+        console.log(`↪️ Redirect to: ${redirectUrl}`);
+        return fetchUrl(redirectUrl).then(resolve).catch(reject);
+      }
+      
+      let data = [];
+      
+      // Handle gzip/deflate
+      let stream = res;
+      const encoding = res.headers['content-encoding'];
+      if (encoding === 'gzip') {
+        const zlib = require('zlib');
+        stream = res.pipe(zlib.createGunzip());
+      } else if (encoding === 'deflate') {
+        const zlib = require('zlib');
+        stream = res.pipe(zlib.createInflate());
+      } else if (encoding === 'br') {
+        const zlib = require('zlib');
+        stream = res.pipe(zlib.createBrotliDecompress());
+      }
+      
+      stream.on('data', (chunk) => data.push(chunk));
+      stream.on('end', () => {
+        const html = Buffer.concat(data).toString();
+        resolve({
+          html: html,
+          headers: res.headers,
+          statusCode: res.statusCode,
+          contentType: res.headers['content-type'] || 'text/html'
+        });
+      });
+      stream.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+// ========== INJECT TAPMONKEY SCRIPT ==========
+function injectTapmonkeyScript(html, tapmonkeyCode) {
+  if (!tapmonkeyCode) {
+    console.warn('⚠️ No TapMonkey code to inject');
+    return html;
+  }
+  
+  const injectionCode = `
+<!-- ===== TAPMONKEY AUTO-INJECTED BY CLOUD BROWSER ===== -->
+<script type="text/javascript">
+(function() {
+  'use strict';
+  console.log('🎮 TapMonkey Cloud Browser Auto-Inject');
+  console.log('⏰ Time: ' + new Date().toLocaleString('vi-VN'));
+  
+  // Execute TapMonkey code
+  try {
+    ${tapmonkeyCode}
+    console.log('✅ TapMonkey executed successfully');
+  } catch(e) {
+    console.error('❌ TapMonkey error:', e.message);
+  }
+})();
+</script>
+<!-- ===== END TAPMONKEY ===== -->
+`;
+  
+  // Inject before </body> or </html>
+  if (html.includes('</body>')) {
+    return html.replace('</body>', injectionCode + '\n</body>');
+  } else if (html.includes('</html>')) {
+    return html.replace('</html>', injectionCode + '\n</html>');
+  } else {
+    return html + injectionCode;
+  }
+}
+
+// ========== PROXY ROUTE ==========
+app.get('/proxy', async (req, res) => {
+  try {
+    let targetUrl = req.query.url;
+    
+    if (!targetUrl) {
+      targetUrl = 'https://f1686s.com/home/mine';
+    }
+    
+    // Decode URL if needed
+    try {
+      targetUrl = decodeURIComponent(targetUrl);
+    } catch(e) {}
+    
+    // Add https if missing
+    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+      targetUrl = 'https://' + targetUrl;
+    }
+    
+    console.log(`🌐 Proxying: ${targetUrl}`);
+    
+    // Fetch target URL
+    const result = await fetchUrl(targetUrl);
+    
+    // Read TapMonkey script
+    let tapmonkeyCode = '';
+    const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
+    
+    if (fs.existsSync(tapmonkeyPath)) {
+      tapmonkeyCode = fs.readFileSync(tapmonkeyPath, 'utf8');
+      console.log('✅ TapMonkey script loaded');
+    } else {
+      console.warn('⚠️ TapMonkey script not found, serving without injection');
+    }
+    
+    // Inject script
+    let modifiedHtml = result.html;
+    if (tapmonkeyCode) {
+      modifiedHtml = injectTapmonkeyScript(modifiedHtml, tapmonkeyCode);
+      console.log('💉 TapMonkey injected into HTML');
+    }
+    
+    // Send response
+    res.set('Content-Type', result.contentType || 'text/html; charset=utf-8');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.send(modifiedHtml);
+    
+  } catch (error) {
+    console.error('❌ Proxy error:', error.message);
+    res.status(500).send(`<h1>❌ Proxy Error</h1><p>${error.message}</p><a href="/">Back to Cloud Browser</a>`);
+  }
+});
+
 // ========== MAIN ROUTE - CLOUD BROWSER ==========
 app.get('/', (req, res) => {
   try {
-    const webLink = 'https://f1686s.com/home/mine';
+    const defaultUrl = 'https://f1686s.com/home/mine';
 
     const html = `
     <!DOCTYPE html>
@@ -31,10 +178,9 @@ app.get('/', (req, res) => {
       <meta http-equiv="X-UA-Compatible" content="ie=edge">
       <meta name="apple-mobile-web-app-capable" content="yes">
       <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-      <meta name="apple-mobile-web-app-title" content="Cloud Browser">
       <meta name="theme-color" content="#667eea">
       <meta name="format-detection" content="telephone=no">
-      <title>☁️ Cloud Browser</title>
+      <title>☁️ Cloud Browser - Auto TapMonkey</title>
       <style>
         * {
           margin: 0;
@@ -93,6 +239,7 @@ app.get('/', (req, res) => {
           display: flex;
           gap: 6px;
           flex-shrink: 0;
+          flex-wrap: wrap;
         }
 
         .btn {
@@ -120,6 +267,19 @@ app.get('/', (req, res) => {
         .btn:disabled {
           opacity: 0.5;
           cursor: not-allowed;
+        }
+
+        .btn-highlight {
+          background: #4caf50;
+          border: 2px solid #45a049;
+          box-shadow: 0 0 10px rgba(76, 175, 80, 0.3);
+          font-weight: 700;
+          animation: glow 2s ease-in-out infinite;
+        }
+
+        @keyframes glow {
+          0%, 100% { box-shadow: 0 0 10px rgba(76, 175, 80, 0.3); }
+          50% { box-shadow: 0 0 20px rgba(76, 175, 80, 0.6); }
         }
 
         .address-bar-container {
@@ -242,6 +402,16 @@ app.get('/', (req, res) => {
           min-width: 100px;
         }
 
+        .tapmonkey-badge {
+          background: #4caf50;
+          color: white;
+          padding: 4px 10px;
+          border-radius: 10px;
+          font-weight: 600;
+          font-size: 10px;
+          animation: pulse 1.5s ease-in-out infinite;
+        }
+
         @media (max-width: 480px) {
           .toolbar {
             min-height: auto;
@@ -275,74 +445,6 @@ app.get('/', (req, res) => {
           }
         }
       </style>
-
-      <script>
-        // ========== DEFINE FUNCTIONS FIRST (BEFORE BODY) ==========
-        function onFrameLoad() {
-          const loadingBar = document.getElementById('loadingBar');
-          if (loadingBar) {
-            loadingBar.classList.remove('active');
-          }
-          console.log('✅ Frame loaded');
-          
-          // ========== LOAD TAPMONKEY SCRIPT ==========
-          try {
-            const iframe = document.getElementById('browserFrame');
-            if (!iframe) {
-              console.warn('⚠️ Iframe not found');
-              return;
-            }
-            
-            setTimeout(() => {
-              try {
-                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-                
-                if (!iframeDoc) {
-                  console.warn('⚠️ Cannot access iframe document (same-origin policy)');
-                  console.warn('⚠️ TapMonkey can only be injected on same-origin pages');
-                  return;
-                }
-                
-                // Check if script already exists
-                if (iframeDoc.getElementById('tapmonkey-script')) {
-                  console.log('✅ TapMonkey already loaded');
-                  return;
-                }
-                
-                const script = iframeDoc.createElement('script');
-                script.id = 'tapmonkey-script';
-                script.src = '/tapmonkey/f1686s_naptien.js';
-                script.type = 'text/javascript';
-                script.async = true;
-                
-                script.onerror = () => {
-                  console.error('❌ TapMonkey load failed - Check file exists at /tapmonkey/f1686s_naptien.js');
-                };
-                
-                script.onload = () => {
-                  console.log('✅ TapMonkey script loaded successfully');
-                };
-                
-                if (iframeDoc.body) {
-                  iframeDoc.body.appendChild(script);
-                  console.log('📦 TapMonkey script injected into iframe');
-                } else {
-                  console.warn('⚠️ Iframe body not ready yet');
-                }
-              } catch (e) {
-                console.warn('⚠️ Cannot inject TapMonkey:', e.message);
-                console.warn('⚠️ This is expected for cross-origin iframes');
-              }
-            }, 500);
-          } catch (e) {
-            console.error('❌ Error in onFrameLoad:', e.message);
-          }
-        }
-
-        function onFrameError() {
-          console.warn('⚠️ Iframe load error');
-        }
-      </script>
     </head>
     <body>
       <div class="status-bar"></div>
@@ -353,7 +455,7 @@ app.get('/', (req, res) => {
           <button class="btn" id="backBtn" title="Back">◀</button>
           <button class="btn" id="forwardBtn" title="Forward">▶</button>
           <button class="btn" id="refreshBtn" title="Refresh">🔄</button>
-          <button class="btn" id="homeBtn" title="Home">🏠</button>
+          <button class="btn btn-highlight" id="homeBtn" title="Home (Auto TapMonkey)">🏠 🎮</button>
         </div>
         <div class="address-bar-container">
           <input 
@@ -361,7 +463,7 @@ app.get('/', (req, res) => {
             class="address-bar" 
             id="addressBar" 
             placeholder="URL"
-            value="https://f1686s.com/home/mine"
+            value="${defaultUrl}"
             autocomplete="off"
           >
           <button class="go-btn" id="goBtn">Go</button>
@@ -373,11 +475,9 @@ app.get('/', (req, res) => {
         <div class="browser-frame-container" id="browserContent">
           <iframe 
             id="browserFrame" 
-            src="https://f1686s.com/home/mine"
-            sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-top-navigation allow-presentation"
+            src="/proxy?url=${encodeURIComponent(defaultUrl)}"
+            sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-top-navigation allow-modals allow-presentation"
             allow="accelerometer; camera; gyroscope; magnetometer; microphone; payment; usb; geolocation"
-            onload="onFrameLoad()"
-            onerror="onFrameError()"
           ></iframe>
         </div>
       </div>
@@ -387,7 +487,8 @@ app.get('/', (req, res) => {
           <div class="status-dot"></div>
           <span>✅ Online</span>
         </div>
-        <span class="url-display" id="urlDisplay">https://f1686s.com/home/mine</span>
+        <span class="tapmonkey-badge">🎮 TapMonkey Auto-Inject</span>
+        <span class="url-display" id="urlDisplay">${defaultUrl}</span>
       </div>
 
       <script>
@@ -403,7 +504,7 @@ app.get('/', (req, res) => {
         const loadingBar = document.getElementById('loadingBar');
         const urlDisplay = document.getElementById('urlDisplay');
 
-        const defaultUrl = 'https://f1686s.com/home/mine';
+        const defaultUrl = '${defaultUrl}';
         let urlHistory = [defaultUrl];
         let historyIndex = 0;
 
@@ -411,7 +512,8 @@ app.get('/', (req, res) => {
         backBtn.addEventListener('click', () => {
           if (historyIndex > 0) {
             historyIndex--;
-            navigateToUrl(urlHistory[historyIndex]);
+            const url = urlHistory[historyIndex];
+            navigateToProxyUrl(url);
             updateButtons();
           }
         });
@@ -420,33 +522,48 @@ app.get('/', (req, res) => {
         forwardBtn.addEventListener('click', () => {
           if (historyIndex < urlHistory.length - 1) {
             historyIndex++;
-            navigateToUrl(urlHistory[historyIndex]);
+            const url = urlHistory[historyIndex];
+            navigateToProxyUrl(url);
             updateButtons();
           }
         });
 
         // Refresh Button
         refreshBtn.addEventListener('click', () => {
-          browserFrame.src = browserFrame.src;
-          showLoading();
+          const currentUrl = urlHistory[historyIndex] || defaultUrl;
+          navigateToProxyUrl(currentUrl);
         });
 
         // Home Button
         homeBtn.addEventListener('click', () => {
-          navigateToUrl(defaultUrl);
+          navigateToProxyUrl(defaultUrl);
         });
 
-        // Go Button & Enter Key
-        goBtn.addEventListener('click', navigateFromAddressBar);
+        // Go Button
+        goBtn.addEventListener('click', () => {
+          navigateFromAddressBar();
+        });
+
+        // Enter Key
         addressBar.addEventListener('keypress', (e) => {
           if (e.key === 'Enter') {
             navigateFromAddressBar();
           }
         });
 
-        // Address Bar Focus
+        // Focus
         addressBar.addEventListener('focus', () => {
           addressBar.select();
+        });
+
+        // Iframe load handler
+        browserFrame.addEventListener('load', () => {
+          loadingBar.classList.remove('active');
+          console.log('✅ Page loaded with TapMonkey auto-injected');
+        });
+
+        browserFrame.addEventListener('error', () => {
+          console.warn('⚠️ Iframe load error');
         });
 
         function navigateFromAddressBar() {
@@ -455,13 +572,15 @@ app.get('/', (req, res) => {
           if (!url.startsWith('http://') && !url.startsWith('https://')) {
             url = 'https://' + url;
           }
-          navigateToUrl(url);
+          navigateToProxyUrl(url);
         }
 
-        function navigateToUrl(url) {
+        function navigateToProxyUrl(url) {
           try {
             new URL(url);
-            browserFrame.src = url;
+            const proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+            
+            browserFrame.src = proxyUrl;
             addressBar.value = url;
             urlDisplay.textContent = url;
 
@@ -473,6 +592,9 @@ app.get('/', (req, res) => {
 
             updateButtons();
             showLoading();
+            
+            console.log('🌐 Navigated: ' + url);
+            console.log('🎮 TapMonkey will auto-inject');
           } catch (e) {
             console.error('Invalid URL:', e.message);
           }
@@ -490,9 +612,10 @@ app.get('/', (req, res) => {
         updateButtons();
 
         console.log('════════════════════════════════════');
-        console.log('☁️ Cloud Browser v3');
+        console.log('☁️ Cloud Browser v4 - Auto TapMonkey');
         console.log('✅ Server ready');
-        console.log('📦 TapMonkey: Auto-inject enabled');
+        console.log('🎮 TapMonkey: Auto-inject via Proxy');
+        console.log('📦 Script tự động chạy, không cần extension');
         console.log('════════════════════════════════════');
       </script>
     </body>
@@ -535,32 +658,14 @@ app.get('/tapmonkey/:filename', (req, res) => {
 
 // ========== API STATUS ==========
 app.get('/api/status', (req, res) => {
+  const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
   res.json({
     status: 'running',
-    server: 'Cloud Browser v3',
-    tapmonkey: 'enabled',
+    server: 'Cloud Browser v4 - Auto TapMonkey',
+    tapmonkey: fs.existsSync(tapmonkeyPath) ? 'ready' : 'missing',
+    injection: 'proxy-based auto-inject',
     timestamp: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
   });
-});
-
-// ========== API DEBUG ==========
-app.get('/api/files', (req, res) => {
-  try {
-    const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey');
-    let files = [];
-    
-    if (fs.existsSync(tapmonkeyPath)) {
-      files = fs.readdirSync(tapmonkeyPath);
-    }
-    
-    res.json({
-      tapmonkeyFolder: fs.existsSync(tapmonkeyPath) ? 'exists' : 'not found',
-      files: files,
-      path: tapmonkeyPath
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
 });
 
 // ========== 404 HANDLER ==========
@@ -578,18 +683,28 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 
 const server = app.listen(PORT, '0.0.0.0', () => {
+  const tapmonkeyPath = path.join(__dirname, 'public', 'tapmonkey', 'f1686s_naptien.js');
+  const tapmonkeyReady = fs.existsSync(tapmonkeyPath);
+  
   console.log('\n');
   console.log('╔════════════════════════════════════════╗');
-  console.log('║  ☁️  CLOUD BROWSER v3 - RENDER         ║');
-  console.log('║  TapMonkey Auto-Inject (FIXED)         ║');
+  console.log('║  ☁️  CLOUD BROWSER v4 - RENDER        ║');
+  console.log('║  🎮 TapMonkey AUTO-INJECT (Proxy)    ║');
   console.log('╚════════════════════════════════════════╝');
   console.log('');
   console.log(`✅ Server started`);
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌐 URL: https://f1686s.com/home/mine`);
-  console.log(`📦 TapMonkey: Auto-inject on iframe load`);
+  console.log(`💉 Injection: Proxy-based (auto)`);
+  console.log(`📦 TapMonkey: ${tapmonkeyReady ? '✅ READY' : '❌ MISSING - Add file to public/tapmonkey/'}`);
   console.log(`⏰ Time: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`);
   console.log('');
+  
+  if (!tapmonkeyReady) {
+    console.warn('⚠️  TAPMONKEY FILE NOT FOUND!');
+    console.warn('⚠️  Create: public/tapmonkey/f1686s_naptien.js');
+    console.log('');
+  }
 });
 
 // ========== GRACEFUL SHUTDOWN ==========
@@ -609,13 +724,13 @@ process.on('SIGINT', () => {
   });
 });
 
-// ========== KEEP ALIVE (Prevent Render sleep) ==========
-const https = require('https');
+// ========== KEEP ALIVE ==========
 setInterval(() => {
-  const appUrl = process.env.RENDER_EXTERNAL_URL || 'https://f1686s-com-render.onrender.com';
-  https.get(appUrl, (res) => {
+  const appUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  const client = appUrl.startsWith('https') ? https : http;
+  client.get(appUrl + '/api/status', (res) => {
     console.log('💓 Keep-alive ping sent');
   }).on('error', (err) => {
     console.log('⚠️ Keep-alive ping failed');
   });
-}, 600000); // 10 minutes
+}, 600000);
